@@ -5,16 +5,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "azuraforge-learner"
-version = "0.1.0"
+version = "0.1.1"
 authors = [{ name = "Azmi Sahin" }]
 description = "High-level deep learning library for model training and management, using the AzuraForge Core engine."
 readme = "README.md"
 requires-python = ">=3.8"
+license = { text = "MIT" }
 dependencies = [
+    # Çekirdek motorumuza olan bağımlılığımız.
     "azuraforge-core @ git+https://github.com/AzuraForge/core.git",
-    "scikit-learn", "matplotlib", "pandas", "pyarrow", "requests", 
-    "python-dotenv", "PyYAML", "python-dateutil", "seaborn"
+    "scikit-learn",
+    "numpy" # scikit-learn için explicit belirtmek iyi bir pratik
 ]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[project.optional-dependencies]
+dev = ["pytest"]

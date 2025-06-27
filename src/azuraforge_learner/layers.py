@@ -4,17 +4,20 @@ import numpy as np
 from azuraforge_core import Tensor, xp
 
 class Layer:
-    def forward(self, *args, **kwargs) -> Tensor: raise NotImplementedError
+    def forward(self, x: Tensor) -> Tensor: raise NotImplementedError
     def parameters(self) -> List[Tensor]: return []
-    def __call__(self, *args, **kwargs) -> Tensor: return self.forward(*args, **kwargs)
+    def __call__(self, x: Tensor) -> Tensor: return self.forward(x)
 
 class Linear(Layer):
-    def __init__(self, input_features: int, output_features: int, bias: bool = True):
-        limit = np.sqrt(2.0 / input_features) if input_features > 0 else 0.1
-        self.weights = Tensor(xp.random.randn(input_features, output_features) * limit, requires_grad=True)
-        self.bias = Tensor(xp.zeros(output_features), requires_grad=True) if bias else None
+    def __init__(self, input_dim: int, output_dim: int):
+        limit = np.sqrt(2.0 / input_dim)
+        self.weights = Tensor(xp.random.randn(input_dim, output_dim) * limit, requires_grad=True)
+        self.bias = Tensor(xp.zeros(output_dim), requires_grad=True)
     def forward(self, x: Tensor) -> Tensor:
-        out = x.dot(self.weights)
-        return out + self.bias if self.bias is not None else out
+        return x.dot(self.weights) + self.bias
     def parameters(self) -> List[Tensor]:
-        return [self.weights] + ([self.bias] if self.bias is not None else [])
+        return [self.weights, self.bias]
+
+class ReLU(Layer):
+    def forward(self, x: Tensor) -> Tensor:
+        return x.relu()
