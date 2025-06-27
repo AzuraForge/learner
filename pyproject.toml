@@ -20,7 +20,3 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
-
-[tool.setuptools.packages.find]
-# "src" klasörünün içine bak ve tüm paketleri kendin bul.
-where = ["src"]
