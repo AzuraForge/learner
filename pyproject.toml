@@ -10,20 +10,11 @@ authors = [{ name = "Azmi Sahin" }]
 description = "High-level deep learning library for model training and management, using the AzuraForge Core engine."
 readme = "README.md"
 requires-python = ">=3.8"
-license = { text = "MIT" }
 dependencies = [
     "azuraforge-core @ git+https://github.com/AzuraForge/core.git",
-    "scikit-learn",
-    "matplotlib",
-    "pandas",
-    "pyarrow",
-    "requests",
-    "python-dotenv",
-    "PyYAML",
-    "python-dateutil",
-    "seaborn",
+    "scikit-learn", "matplotlib", "pandas", "pyarrow", "requests", 
+    "python-dotenv", "PyYAML", "python-dateutil", "seaborn"
 ]
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-packages = ["azuraforge_learner", "azuraforge_learner.utils"]
+[tool.setuptools.packages.find]
+where = ["src"]
