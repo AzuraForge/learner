@@ -1,0 +1,20 @@
+# ========== DOSYA: learner/pyproject.toml ==========
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "azuraforge-learner"
+version = "0.1.0"
+description = "High-level deep learning library for model training and management, part of the AzuraForge ecosystem."
+dependencies = [
+    # Çekirdek motorumuza olan bağımlılığımız
+    "azuraforge-core @ git+https://github.com/AzuraForge/core.git",
+    "scikit-learn", "matplotlib", "pandas",
+    "pyarrow", "requests", "python-dotenv", "PyYAML",
+    "python-dateutil", "seaborn"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["azuraforge_learner", "azuraforge_learner.utils"]
