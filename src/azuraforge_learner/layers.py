@@ -20,3 +20,8 @@ class Linear(Layer):
 class ReLU(Layer):
     def forward(self, x: Tensor) -> Tensor:
         return x.relu()
+
+# YENİ: Sigmoid Katmanı
+class Sigmoid(Layer):
+    def forward(self, x: Tensor) -> Tensor:
+        return x.sigmoid()
