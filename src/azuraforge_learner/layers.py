@@ -1,4 +1,3 @@
-# ========== DOSYA: src/azuraforge_learner/layers.py ==========
 from typing import List
 import numpy as np
 from azuraforge_core import Tensor, xp

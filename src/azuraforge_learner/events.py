@@ -1,4 +1,3 @@
-# ========== DOSYA: src/azuraforge_learner/events.py ==========
 from dataclasses import dataclass, field
 from typing import Dict, Any, Literal, TYPE_CHECKING
 

@@ -1,4 +1,3 @@
-# ========== DOSYA: src/azuraforge_learner/losses.py ==========
 from azuraforge_core import Tensor
 
 class Loss:

@@ -1,4 +1,3 @@
-# ========== DOSYA: src/azuraforge_learner/optimizers.py ==========
 from typing import List
 from azuraforge_core import Tensor
 

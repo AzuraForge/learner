@@ -1,4 +1,3 @@
-# ========== GÜNCELLENECEK DOSYA: src/azuraforge_learner/callbacks.py ==========
 import os
 import numpy as np
 from .events import Event
