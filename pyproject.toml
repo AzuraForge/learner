@@ -11,10 +11,10 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
 dependencies = [
-    # Çekirdek motorumuza olan bağımlılığımız.
     "azuraforge-core @ git+https://github.com/AzuraForge/core.git@main",
     "scikit-learn",
-    "numpy" # scikit-learn için explicit belirtmek iyi bir pratik
+    "numpy",
+    "redis" # YENİ BAĞIMLILIK
 ]
 
 [project.optional-dependencies]
