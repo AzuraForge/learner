@@ -22,17 +22,15 @@ class Learner:
         event = Event(name=event_name, learner=self, payload=payload or {})
         for cb in self.callbacks: cb(event)
         
-        # DÜZELTME: Celery Task durumunu zengin meta verilerle güncelle
+        # DÜZELTME: Celery Task durumunu güncellerken veriyi doğrudan 'meta' olarak gönderiyoruz.
+        # Bu, payload'un direkt olarak task.info alanına yazılmasını sağlar.
         if self.current_task and hasattr(self.current_task, 'update_state'):
-            # Celery'ye 'PROGRESS' durumu ve detaylı bir payload gönder
-            # Bu payload, UI'da canlı ilerleme çubuğu ve grafik çizdirmek için kullanılacak
-            self.current_task.update_state(state='PROGRESS', meta={'details': payload})
+            self.current_task.update_state(state='PROGRESS', meta=payload)
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray, epochs: int):
         self.history = {"loss": []}
         X_train_t, y_train_t = Tensor(X_train), Tensor(y_train)
         
-        # DÜZELTME: Eğitim başlangıcında toplam epoch sayısını gönder
         self._publish("train_begin", payload={"total_epochs": epochs, "status_text": "Eğitim başlıyor..."})
         
         for epoch in range(epochs):
@@ -47,19 +45,19 @@ class Learner:
             loss.backward()
             self.optimizer.step()
             
-            current_loss = loss.data.item() if hasattr(loss.data, 'item') else float(loss.data)
+            current_loss = loss.to_cpu().item() if hasattr(loss, 'to_cpu') else float(loss.data)
             
-            # DÜZELTME: Her epoch sonunda UI'a gönderilecek zengin bir log oluştur
             epoch_logs = {
                 "epoch": epoch + 1,
                 "total_epochs": epochs,
                 "loss": current_loss,
-                "status_text": f"Epoch {epoch + 1}/{epochs} tamamlandı, Kayıp: {current_loss:.6f}"
+                "status_text": f"Epoch {epoch + 1}/{epochs} tamamlandı, Kayıp: {current_loss:.6f}",
+                # DÜZELTME: Pipeline adını da payload'a ekleyelim.
+                "pipeline_name": self.current_task.request.kwargs.get('config', {}).get('pipeline_name', 'Bilinmiyor')
             }
             
             self.history["loss"].append(current_loss)
             
-            # DÜZELTME: Zenginleştirilmiş epoch loglarını yayınla
             self._publish("epoch_end", payload=epoch_logs)
             
         self._publish("train_end", payload={"status_text": "Eğitim tamamlandı."})
