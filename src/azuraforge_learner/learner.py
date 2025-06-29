@@ -1,4 +1,5 @@
 import pickle
+import time  # YENİ: time modülünü import ediyoruz
 from typing import Any, Dict, List, Optional
 import numpy as np
 from azuraforge_core import Tensor
@@ -22,8 +23,6 @@ class Learner:
         event = Event(name=event_name, learner=self, payload=payload or {})
         for cb in self.callbacks: cb(event)
         
-        # DÜZELTME: Celery Task durumunu güncellerken veriyi doğrudan 'meta' olarak gönderiyoruz.
-        # Bu, payload'un direkt olarak task.info alanına yazılmasını sağlar.
         if self.current_task and hasattr(self.current_task, 'update_state'):
             self.current_task.update_state(state='PROGRESS', meta=payload)
 
@@ -31,12 +30,17 @@ class Learner:
         self.history = {"loss": []}
         X_train_t, y_train_t = Tensor(X_train), Tensor(y_train)
         
-        self._publish("train_begin", payload={"total_epochs": epochs, "status_text": "Eğitim başlıyor..."})
+        # pipeline_name'i ilk başta alalım
+        pipeline_name = "Bilinmiyor"
+        if self.current_task and hasattr(self.current_task, 'request'):
+            pipeline_name = self.current_task.request.kwargs.get('config', {}).get('pipeline_name', 'Bilinmiyor')
+
+        self._publish("train_begin", payload={"total_epochs": epochs, "status_text": "Eğitim başlıyor...", "pipeline_name": pipeline_name})
         
         for epoch in range(epochs):
             if self.stop_training: break
             
-            self._publish("epoch_begin", payload={"epoch": epoch, "total_epochs": epochs})
+            self._publish("epoch_begin", payload={"epoch": epoch, "total_epochs": epochs, "pipeline_name": pipeline_name})
             
             y_pred = self.model(X_train_t)
             loss = self.criterion(y_pred, y_train_t)
@@ -52,13 +56,16 @@ class Learner:
                 "total_epochs": epochs,
                 "loss": current_loss,
                 "status_text": f"Epoch {epoch + 1}/{epochs} tamamlandı, Kayıp: {current_loss:.6f}",
-                # DÜZELTME: Pipeline adını da payload'a ekleyelim.
-                "pipeline_name": self.current_task.request.kwargs.get('config', {}).get('pipeline_name', 'Bilinmiyor')
+                "pipeline_name": pipeline_name
             }
             
             self.history["loss"].append(current_loss)
             
             self._publish("epoch_end", payload=epoch_logs)
             
-        self._publish("train_end", payload={"status_text": "Eğitim tamamlandı."})
+            # KRİTİK DEĞİŞİKLİK: CPU'ya nefes alması için çok kısa bir süre ver.
+            # Bu, worker'ın durum güncelleme mesajını göndermesine olanak tanır.
+            time.sleep(0.01)
+            
+        self._publish("train_end", payload={"status_text": "Eğitim tamamlandı.", "pipeline_name": pipeline_name})
         return self.history
