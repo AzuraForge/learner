@@ -9,7 +9,7 @@ from sklearn.preprocessing import StandardScaler
 
 from .learner import Learner, Callback
 from .models import Sequential
-from .utils import generate_regression_report
+from .reporting import generate_regression_report
 
 class BasePipeline(ABC):
     """
