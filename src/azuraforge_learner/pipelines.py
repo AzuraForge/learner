@@ -1,3 +1,5 @@
+# learner/src/azuraforge_learner/pipelines.py
+
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -27,7 +29,6 @@ def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np
 class BasePipeline(ABC):
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        # DÜZELTME: Sadece logger'ı al, yapılandırmayı yapma.
         self.logger = logging.getLogger(self.__class__.__name__)
 
     @abstractmethod
@@ -60,8 +61,17 @@ class LivePredictionCallback(Callback):
             dummy_test = np.zeros((len(self.y_val), len(feature_cols)))
             dummy_pred[:, target_idx] = y_pred_scaled.flatten()
             dummy_test[:, target_idx] = self.y_val.flatten()
-            y_pred_unscaled = self.pipeline.scaler.inverse_transform(dummy_pred)[:, target_idx]
-            y_test_unscaled = self.pipeline.scaler.inverse_transform(dummy_test)[:, target_idx]
+            y_pred_unscaled_transformed = self.pipeline.scaler.inverse_transform(dummy_pred)[:, target_idx]
+            y_test_unscaled_transformed = self.pipeline.scaler.inverse_transform(dummy_test)[:, target_idx]
+
+            # YENİ: Değerlendirme sırasında da ters dönüşümü uygula
+            target_transform = self.pipeline.config.get("feature_engineering", {}).get("target_col_transform")
+            if target_transform == 'log':
+                y_pred_unscaled = np.exp(y_pred_unscaled_transformed)
+                y_test_unscaled = np.exp(y_test_unscaled_transformed)
+            else:
+                y_pred_unscaled = y_pred_unscaled_transformed
+                y_test_unscaled = y_test_unscaled_transformed
 
             validation_payload = {
                 "x_axis": [d.isoformat() for d in self.time_index_val],
@@ -80,6 +90,7 @@ class LivePredictionCallback(Callback):
                 "y_true": y_test_unscaled, "y_pred": y_pred_unscaled,
                 "time_index": self.time_index_val, "y_label": target_col
             }
+
 
 class TimeSeriesPipeline(BasePipeline):
     def __init__(self, config: Dict[str, Any]):
@@ -135,7 +146,16 @@ class TimeSeriesPipeline(BasePipeline):
         if not all(col in raw_data.columns for col in feature_cols):
             raise ValueError(f"Yapılandırılan özellik sütunları ({feature_cols}) indirilen veride bulunamadı.")
             
-        data_to_process = raw_data[feature_cols]
+        data_to_process = raw_data[feature_cols].copy() # .copy() ile warning'i engelle
+
+        # YENİ: Logaritmik dönüşümü burada uygula
+        fe_config = self.config.get("feature_engineering", {})
+        target_transform = fe_config.get("target_col_transform")
+        if target_transform == 'log':
+            self.logger.info(f"'{target_col}' sütununa logaritmik dönüşüm uygulanıyor.")
+            # Negatif veya sıfır değerlerden kaçınmak için 1 ekleyebilir veya klipleyebiliriz.
+            data_to_process[target_col] = np.log1p(data_to_process[target_col])
+        
         sequence_length = self.config.get("model_params", {}).get("sequence_length", 60)
         scaled_data = self.scaler.fit_transform(data_to_process)
         
@@ -177,6 +197,8 @@ class TimeSeriesPipeline(BasePipeline):
         
         final_loss = history['loss'][-1] if history.get('loss') else None
         
+        # Sonucu worker'a döndürürken de ters dönüşüm yapıldığından emin olmalıyız.
+        # LivePredictionCallback bunu zaten yapıyor. Ondan gelen sonucu kullanalım.
         return {
             "final_loss": final_loss,
             "metrics": final_results.get('metrics', {}),
