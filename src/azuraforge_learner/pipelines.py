@@ -83,6 +83,9 @@ class TimeSeriesPipeline(BasePipeline):
         self.scaler = MinMaxScaler(feature_range=(-1, 1))
         self.feature_scaler = MinMaxScaler(feature_range=(-1, 1))
         self.learner: Optional[Learner] = None
+        # Testlerin ve hata ayıklamanın erişebilmesi için sınıf özelliklerini tanımla
+        self.X_train: Optional[np.ndarray] = None
+        self.y_train: Optional[np.ndarray] = None
         self.X_test: Optional[np.ndarray] = None
         self.y_test: Optional[np.ndarray] = None
         self.time_index_test: Optional[pd.Index] = None
@@ -168,11 +171,16 @@ class TimeSeriesPipeline(BasePipeline):
         
         test_size = self.config.get("training_params", {}).get("test_size", 0.2)
         split_idx = int(len(X) * (1 - test_size))
-        X_train, self.X_test = X[:split_idx], X[split_idx:]
-        y_train, self.y_test = y[:split_idx], y[split_idx:]
+
+        # === DEĞİŞİKLİK BURADA ===
+        # Değişkenleri sınıf özelliği olarak atıyoruz
+        self.X_train, self.X_test = X[:split_idx], X[split_idx:]
+        self.y_train, self.y_test = y[:split_idx], y[split_idx:]
+        # === DEĞİŞİKLİK SONU ===
+        
         self.time_index_test = raw_data.index[split_idx + sequence_length:]
 
-        model = self._create_model(X_train.shape)
+        model = self._create_model(self.X_train.shape)
         
         live_predict_cb = LivePredictionCallback(pipeline=self, X_val=self.X_test, y_val=self.y_test, time_index_val=self.time_index_test)
         all_callbacks = (callbacks or []) + [live_predict_cb]
@@ -181,8 +189,8 @@ class TimeSeriesPipeline(BasePipeline):
 
         epochs = int(self.config.get("training_params", {}).get("epochs", 50))
         self.logger.info(f"{epochs} epoch için model eğitimi başlıyor...")
-        # KRİTİK DÜZELTME: fit metoduna y_test yerine y_train veriyoruz.
-        history = self.learner.fit(X_train, y_train, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
+
+        history = self.learner.fit(self.X_train, self.y_train, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
         
         final_results = live_predict_cb.last_results
         if not final_results:
