@@ -15,7 +15,6 @@ from .reporting import generate_regression_report
 from .optimizers import Adam, SGD
 from .losses import MSELoss
 from .events import Event
-# YENİ: Merkezi caching modülünü import ediyoruz
 from .caching import get_cache_filepath, load_from_cache, save_to_cache
 
 def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -31,13 +30,14 @@ class BasePipeline(ABC):
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
-        logging.basicConfig(level="INFO", format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', force=True)
+        logging.basicConfig(level="INFO", format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s', force=True)
 
     @abstractmethod
     def run(self, callbacks: Optional[List[Callback]] = None) -> Dict[str, Any]:
         pass
 
 class LivePredictionCallback(Callback):
+    # ... (Bu sınıfın içeriği aynı kalıyor, bir önceki adımdaki gibi)
     def __init__(self, pipeline: 'TimeSeriesPipeline', X_val: np.ndarray, y_val: np.ndarray, time_index_val: pd.Index, validate_every_n_epochs: int):
         super().__init__()
         self.pipeline = pipeline
@@ -92,16 +92,9 @@ class TimeSeriesPipeline(BasePipeline):
 
     @abstractmethod
     def _load_data_from_source(self) -> pd.DataFrame:
-        """
-        EKLENTİ TARAFINDAN UYGULANACAK: Veriyi asıl kaynağından (API, dosya vb.) çeker.
-        """
         pass
         
     def get_caching_params(self) -> Dict[str, Any]:
-        """
-        EKLENTİ TARAFINDAN UYGULANACAK: Önbellek anahtarı için benzersiz parametreleri döndürür.
-        """
-        # Varsayılan olarak, data_sourcing bloğunun tamamını kullanır.
         return self.config.get("data_sourcing", {})
 
     @abstractmethod
@@ -122,31 +115,29 @@ class TimeSeriesPipeline(BasePipeline):
     def run(self, callbacks: Optional[List[Callback]] = None) -> Dict[str, Any]:
         self.logger.info(f"'{self.config.get('pipeline_name')}' pipeline başlatılıyor...")
         
-        # YENİ: Merkezi Caching Mantığı
         system_config = self.config.get("system", {})
         cache_enabled = system_config.get("caching_enabled", True)
-        # Ortam değişkeninden CACHE_DIR'i al, yoksa config'den al, o da yoksa varsayılanı kullan
         cache_dir = os.getenv("CACHE_DIR", system_config.get("cache_dir", ".cache"))
         cache_max_age = system_config.get("cache_max_age_hours", 24)
         
         cache_params = self.get_caching_params()
-        cache_filepath = get_cache_filepath(
-            cache_dir, 
-            self.config.get('pipeline_name', 'default_context'), 
-            cache_params
-        )
+        cache_filepath = get_cache_filepath(cache_dir, self.config.get('pipeline_name', 'default_context'), cache_params)
 
         raw_data = None
         if cache_enabled:
             raw_data = load_from_cache(cache_filepath, cache_max_age)
 
         if raw_data is None:
+            self.logger.info("Önbellek boş veya geçersiz. Veri kaynaktan çekiliyor...")
             raw_data = self._load_data_from_source()
-            if cache_enabled and not raw_data.empty:
+            if cache_enabled and isinstance(raw_data, pd.DataFrame) and not raw_data.empty:
                 save_to_cache(raw_data, cache_filepath)
-
+        
         target_col, feature_cols = self._get_target_and_feature_cols()
-        # ... (Geri kalan run metodu, bir önceki adımdaki gibi aynı şekilde devam eder)
+        
+        if not all(col in raw_data.columns for col in feature_cols):
+            raise ValueError(f"Yapılandırılan özellik sütunları ({feature_cols}) indirilen veride bulunamadı.")
+            
         data_to_process = raw_data[feature_cols]
         sequence_length = self.config.get("model_params", {}).get("sequence_length", 60)
         scaled_data = self.scaler.fit_transform(data_to_process)
