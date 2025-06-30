@@ -13,13 +13,13 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
 dependencies = [
-    "azuraforge-core @ git+https://github.com/AzuraForge/core.git@main",
+    "azuraforge-core @ git+https://github.com/AzuraForge/core.git@v0.1.2", # <-- DEĞİŞTİ
     "scikit-learn",
     "numpy",
     "redis",
     "matplotlib",
     "pandas",
-    "pyarrow" # YENİ VE KRİTİK BAĞIMLILIK
+    "pyarrow"
 ]
 
 [project.optional-dependencies]
