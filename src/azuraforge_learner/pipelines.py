@@ -16,7 +16,6 @@ from .losses import MSELoss
 from .events import Event
 
 def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np.ndarray]:
-    """Yardımcı fonksiyon: Veriyi (samples, sequence_length, features) formatına dönüştürür."""
     xs, ys = [], []
     for i in range(len(data) - seq_length):
         x = data[i:(i + seq_length)]
@@ -26,7 +25,6 @@ def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np
     return np.array(xs), np.array(ys)
 
 class BasePipeline(ABC):
-    """Tüm pipeline'lar için en temel soyut sınıf."""
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -36,7 +34,6 @@ class BasePipeline(ABC):
     def run(self, callbacks: Optional[List[Callback]] = None) -> Dict[str, Any]:
         pass
 
-# YENİ: Canlı tahmin ve raporlama için özel bir Callback
 class LivePredictionCallback(Callback):
     def __init__(self, pipeline: 'TimeSeriesPipeline', X_val: np.ndarray, y_val: np.ndarray, time_index_val: pd.Index, validate_every_n_epochs: int):
         super().__init__()
@@ -51,7 +48,6 @@ class LivePredictionCallback(Callback):
         epoch = event.payload.get("epoch", 0)
         total_epochs = event.payload.get("total_epochs", 1)
 
-        # Her N epoch'ta bir veya son epoch'ta çalıştır
         if (epoch % self.validate_every == 0 and epoch > 0) or (epoch == total_epochs):
             if not self.learner: return
 
@@ -60,7 +56,6 @@ class LivePredictionCallback(Callback):
             target_col, feature_cols = self.pipeline._get_target_and_feature_cols()
             target_idx = feature_cols.index(target_col)
             
-            # Ölçeği geri al
             dummy_pred = np.zeros((len(y_pred_scaled), len(feature_cols)))
             dummy_test = np.zeros((len(self.y_val), len(feature_cols)))
             dummy_pred[:, target_idx] = y_pred_scaled.flatten()
@@ -68,7 +63,6 @@ class LivePredictionCallback(Callback):
             y_pred_unscaled = self.pipeline.scaler.inverse_transform(dummy_pred)[:, target_idx]
             y_test_unscaled = self.pipeline.scaler.inverse_transform(dummy_test)[:, target_idx]
 
-            # Standart veri yapısını oluştur
             validation_payload = {
                 "x_axis": [d.isoformat() for d in self.time_index_val],
                 "y_true": y_test_unscaled.tolist(),
@@ -76,10 +70,8 @@ class LivePredictionCallback(Callback):
                 "x_label": "Tarih",
                 "y_label": target_col
             }
-            # Orijinal payload'a bu veriyi ekle
             event.payload['validation_data'] = validation_payload
             
-            # Sonuçları sakla (raporlama için)
             from sklearn.metrics import r2_score, mean_absolute_error
             self.last_results = {
                 "history": self.learner.history,
@@ -91,12 +83,7 @@ class LivePredictionCallback(Callback):
                 "time_index": self.time_index_val, "y_label": target_col
             }
 
-
 class TimeSeriesPipeline(BasePipeline):
-    """
-    Zaman serisi problemleri için standartlaştırılmış bir pipeline iskeleti.
-    Veri işleme, eğitim, değerlendirme ve raporlama akışını yönetir.
-    """
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.scaler = MinMaxScaler(feature_range=(-1, 1))
@@ -148,9 +135,7 @@ class TimeSeriesPipeline(BasePipeline):
         model = self._create_model(X_train.shape)
         
         live_predict_cb = LivePredictionCallback(
-            pipeline=self, 
-            X_val=X_test, 
-            y_val=y_test, 
+            pipeline=self, X_val=X_test, y_val=y_test, 
             time_index_val=time_index_test,
             validate_every_n_epochs=self.config.get("training_params", {}).get("validate_every", 5)
         )
@@ -169,13 +154,14 @@ class TimeSeriesPipeline(BasePipeline):
         self.logger.info("Rapor oluşturuluyor...")
         generate_regression_report(final_results, self.config)
         
-        final_results_for_worker = {
-            "final_loss": history['loss'][-1] if history.get('loss') else None,
-            "metrics": final_results.get('metrics', {})
+        # DÜZELTME: Worker'a döndürülecek nihai sonuçları JSON uyumlu hale getir
+        final_loss = history['loss'][-1] if history.get('loss') else None
+        
+        return {
+            "final_loss": final_loss,
+            "metrics": final_results.get('metrics', {}),
+            "history": final_results.get('history', {}),
+            "y_true": final_results.get('y_true', np.array([])).tolist(),
+            "y_pred": final_results.get('y_pred', np.array([])).tolist(),
+            "time_index": [d.isoformat() for d in final_results.get('time_index', [])]
         }
-        # Grafikler için gerekli veriyi de ekle
-        final_results_for_worker.update({
-            k: v for k, v in final_results.items() if k in ['history', 'y_true', 'y_pred', 'time_index']
-        })
-
-        return final_results_for_worker
