@@ -13,8 +13,10 @@ from .models import Sequential
 from .reporting import generate_regression_report
 from .optimizers import Adam, SGD
 from .losses import MSELoss
+from .events import Event
 
 def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Yardımcı fonksiyon: Veriyi (samples, sequence_length, features) formatına dönüştürür."""
     xs, ys = [], []
     for i in range(len(data) - seq_length):
         x = data[i:(i + seq_length)]
@@ -24,19 +26,81 @@ def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np
     return np.array(xs), np.array(ys)
 
 class BasePipeline(ABC):
+    """Tüm pipeline'lar için en temel soyut sınıf."""
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
-        logging.basicConfig(level="INFO", format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        logging.basicConfig(level="INFO", format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', force=True)
 
     @abstractmethod
     def run(self, callbacks: Optional[List[Callback]] = None) -> Dict[str, Any]:
         pass
 
+# YENİ: Canlı tahmin ve raporlama için özel bir Callback
+class LivePredictionCallback(Callback):
+    def __init__(self, pipeline: 'TimeSeriesPipeline', X_val: np.ndarray, y_val: np.ndarray, time_index_val: pd.Index, validate_every_n_epochs: int):
+        super().__init__()
+        self.pipeline = pipeline
+        self.X_val = X_val
+        self.y_val = y_val
+        self.time_index_val = time_index_val
+        self.validate_every = validate_every_n_epochs
+        self.last_results: Dict[str, Any] = {}
+
+    def on_epoch_end(self, event: Event) -> None:
+        epoch = event.payload.get("epoch", 0)
+        total_epochs = event.payload.get("total_epochs", 1)
+
+        # Her N epoch'ta bir veya son epoch'ta çalıştır
+        if (epoch % self.validate_every == 0 and epoch > 0) or (epoch == total_epochs):
+            if not self.learner: return
+
+            y_pred_scaled = self.learner.predict(self.X_val)
+            
+            target_col, feature_cols = self.pipeline._get_target_and_feature_cols()
+            target_idx = feature_cols.index(target_col)
+            
+            # Ölçeği geri al
+            dummy_pred = np.zeros((len(y_pred_scaled), len(feature_cols)))
+            dummy_test = np.zeros((len(self.y_val), len(feature_cols)))
+            dummy_pred[:, target_idx] = y_pred_scaled.flatten()
+            dummy_test[:, target_idx] = self.y_val.flatten()
+            y_pred_unscaled = self.pipeline.scaler.inverse_transform(dummy_pred)[:, target_idx]
+            y_test_unscaled = self.pipeline.scaler.inverse_transform(dummy_test)[:, target_idx]
+
+            # Standart veri yapısını oluştur
+            validation_payload = {
+                "x_axis": [d.isoformat() for d in self.time_index_val],
+                "y_true": y_test_unscaled.tolist(),
+                "y_pred": y_pred_unscaled.tolist(),
+                "x_label": "Tarih",
+                "y_label": target_col
+            }
+            # Orijinal payload'a bu veriyi ekle
+            event.payload['validation_data'] = validation_payload
+            
+            # Sonuçları sakla (raporlama için)
+            from sklearn.metrics import r2_score, mean_absolute_error
+            self.last_results = {
+                "history": self.learner.history,
+                "metrics": {
+                    'r2_score': r2_score(y_test_unscaled, y_pred_unscaled),
+                    'mae': mean_absolute_error(y_test_unscaled, y_pred_unscaled)
+                },
+                "y_true": y_test_unscaled, "y_pred": y_pred_unscaled,
+                "time_index": self.time_index_val, "y_label": target_col
+            }
+
+
 class TimeSeriesPipeline(BasePipeline):
+    """
+    Zaman serisi problemleri için standartlaştırılmış bir pipeline iskeleti.
+    Veri işleme, eğitim, değerlendirme ve raporlama akışını yönetir.
+    """
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.scaler = MinMaxScaler(feature_range=(-1, 1))
+        self.learner: Optional[Learner] = None
 
     @abstractmethod
     def _load_data(self) -> pd.DataFrame:
@@ -54,7 +118,6 @@ class TimeSeriesPipeline(BasePipeline):
         training_params = self.config.get("training_params", {})
         lr = float(training_params.get("lr", 0.001))
         optimizer_type = str(training_params.get("optimizer", "adam")).lower()
-
         optimizer = Adam(model.parameters(), lr=lr) if optimizer_type == "adam" else SGD(model.parameters(), lr=lr)
         return Learner(model, MSELoss(), optimizer, callbacks=callbacks)
 
@@ -63,11 +126,8 @@ class TimeSeriesPipeline(BasePipeline):
         
         raw_data = self._load_data()
         target_col, feature_cols = self._get_target_and_feature_cols()
-        
-        if not all(col in raw_data.columns for col in feature_cols):
-            raise ValueError("Yapılandırılan özellik sütunları veride bulunamadı.")
-            
         data_to_process = raw_data[feature_cols]
+
         sequence_length = self.config.get("model_params", {}).get("sequence_length", 60)
         scaled_data = self.scaler.fit_transform(data_to_process)
         
@@ -86,38 +146,36 @@ class TimeSeriesPipeline(BasePipeline):
         time_index_test = raw_data.index[split_idx + sequence_length:]
 
         model = self._create_model(X_train.shape)
-        learner = self._create_learner(model, callbacks)
+        
+        live_predict_cb = LivePredictionCallback(
+            pipeline=self, 
+            X_val=X_test, 
+            y_val=y_test, 
+            time_index_val=time_index_test,
+            validate_every_n_epochs=self.config.get("training_params", {}).get("validate_every", 5)
+        )
+        all_callbacks = (callbacks or []) + [live_predict_cb]
+        
+        self.learner = self._create_learner(model, all_callbacks)
 
         epochs = int(self.config.get("training_params", {}).get("epochs", 50))
         self.logger.info(f"{epochs} epoch için model eğitimi başlıyor...")
-        history = learner.fit(X_train, y_train, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
+        history = self.learner.fit(X_train, y_train, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
         
-        self.logger.info("Model değerlendiriliyor...")
-        y_pred_scaled = learner.predict(X_test)
-        
-        # Ölçeklemeyi geri almak için geçici bir matris oluştur
-        dummy_pred = np.zeros((len(y_pred_scaled), len(feature_cols)))
-        dummy_test = np.zeros((len(y_test), len(feature_cols)))
-        dummy_pred[:, target_idx] = y_pred_scaled.flatten()
-        dummy_test[:, target_idx] = y_test.flatten()
-        
-        y_pred_unscaled = self.scaler.inverse_transform(dummy_pred)[:, target_idx]
-        y_test_unscaled = self.scaler.inverse_transform(dummy_test)[:, target_idx]
-        
-        from sklearn.metrics import r2_score, mean_absolute_error
-        metrics = {
-            'r2_score': r2_score(y_test_unscaled, y_pred_unscaled),
-            'mae': mean_absolute_error(y_test_unscaled, y_pred_unscaled)
-        }
-        
+        final_results = live_predict_cb.last_results
+        if not final_results:
+            return {"status": "failed", "message": "Eğitim tamamlanamadı veya hiç doğrulama yapılmadı."}
+
         self.logger.info("Rapor oluşturuluyor...")
-        final_results = {
-            "history": history, "metrics": metrics,
-            "y_true": y_test_unscaled.tolist(), "y_pred": y_pred_unscaled.tolist(),
-            "time_index": [d.isoformat() for d in time_index_test], "y_label": target_col
-        }
         generate_regression_report(final_results, self.config)
         
-        # DÜZELTME: Worker'a tüm zenginleştirilmiş sonucu döndür
-        final_results["final_loss"] = history['loss'][-1] if history.get('loss') else None
-        return final_results
+        final_results_for_worker = {
+            "final_loss": history['loss'][-1] if history.get('loss') else None,
+            "metrics": final_results.get('metrics', {})
+        }
+        # Grafikler için gerekli veriyi de ekle
+        final_results_for_worker.update({
+            k: v for k, v in final_results.items() if k in ['history', 'y_true', 'y_pred', 'time_index']
+        })
+
+        return final_results_for_worker
