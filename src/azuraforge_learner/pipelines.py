@@ -1,5 +1,3 @@
-# learner/src/azuraforge_learner/pipelines.py
-
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -29,15 +27,14 @@ def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np
 class BasePipeline(ABC):
     def __init__(self, config: Dict[str, Any]):
         self.config = config
+        # DÜZELTME: Sadece logger'ı al, yapılandırmayı yapma.
         self.logger = logging.getLogger(self.__class__.__name__)
-        logging.basicConfig(level="INFO", format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s', force=True)
 
     @abstractmethod
     def run(self, callbacks: Optional[List[Callback]] = None) -> Dict[str, Any]:
         pass
 
 class LivePredictionCallback(Callback):
-    # ... (Bu sınıfın içeriği aynı kalıyor, bir önceki adımdaki gibi)
     def __init__(self, pipeline: 'TimeSeriesPipeline', X_val: np.ndarray, y_val: np.ndarray, time_index_val: pd.Index, validate_every_n_epochs: int):
         super().__init__()
         self.pipeline = pipeline
