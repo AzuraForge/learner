@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "azuraforge-learner"
-version = "0.1.1"
+version = "0.1.2" # Sürüm artırımı
 authors = [{ name = "Azmi Sahin" }]
 description = "High-level deep learning library for model training and management, using the AzuraForge Core engine."
 readme = "README.md"
@@ -14,7 +14,9 @@ dependencies = [
     "azuraforge-core @ git+https://github.com/AzuraForge/core.git@main",
     "scikit-learn",
     "numpy",
-    "redis" # YENİ BAĞIMLILIK
+    "redis",
+    "matplotlib", # YENİ BAĞIMLILIK
+    "pandas"      # YENİ BAĞIMLILIK (raporlama için)
 ]
 
 [project.optional-dependencies]
