@@ -1,6 +1,7 @@
 # learner/src/azuraforge_learner/pipelines.py
 
 import logging
+import os
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Tuple, Optional, List
 
@@ -14,6 +15,8 @@ from .reporting import generate_regression_report
 from .optimizers import Adam, SGD
 from .losses import MSELoss
 from .events import Event
+# YENİ: Merkezi caching modülünü import ediyoruz
+from .caching import get_cache_filepath, load_from_cache, save_to_cache
 
 def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np.ndarray]:
     xs, ys = [], []
@@ -65,10 +68,8 @@ class LivePredictionCallback(Callback):
 
             validation_payload = {
                 "x_axis": [d.isoformat() for d in self.time_index_val],
-                "y_true": y_test_unscaled.tolist(),
-                "y_pred": y_pred_unscaled.tolist(),
-                "x_label": "Tarih",
-                "y_label": target_col
+                "y_true": y_test_unscaled.tolist(), "y_pred": y_pred_unscaled.tolist(),
+                "x_label": "Tarih", "y_label": target_col
             }
             event.payload['validation_data'] = validation_payload
             
@@ -90,8 +91,18 @@ class TimeSeriesPipeline(BasePipeline):
         self.learner: Optional[Learner] = None
 
     @abstractmethod
-    def _load_data(self) -> pd.DataFrame:
+    def _load_data_from_source(self) -> pd.DataFrame:
+        """
+        EKLENTİ TARAFINDAN UYGULANACAK: Veriyi asıl kaynağından (API, dosya vb.) çeker.
+        """
         pass
+        
+    def get_caching_params(self) -> Dict[str, Any]:
+        """
+        EKLENTİ TARAFINDAN UYGULANACAK: Önbellek anahtarı için benzersiz parametreleri döndürür.
+        """
+        # Varsayılan olarak, data_sourcing bloğunun tamamını kullanır.
+        return self.config.get("data_sourcing", {})
 
     @abstractmethod
     def _get_target_and_feature_cols(self) -> Tuple[str, List[str]]:
@@ -111,10 +122,32 @@ class TimeSeriesPipeline(BasePipeline):
     def run(self, callbacks: Optional[List[Callback]] = None) -> Dict[str, Any]:
         self.logger.info(f"'{self.config.get('pipeline_name')}' pipeline başlatılıyor...")
         
-        raw_data = self._load_data()
-        target_col, feature_cols = self._get_target_and_feature_cols()
-        data_to_process = raw_data[feature_cols]
+        # YENİ: Merkezi Caching Mantığı
+        system_config = self.config.get("system", {})
+        cache_enabled = system_config.get("caching_enabled", True)
+        # Ortam değişkeninden CACHE_DIR'i al, yoksa config'den al, o da yoksa varsayılanı kullan
+        cache_dir = os.getenv("CACHE_DIR", system_config.get("cache_dir", ".cache"))
+        cache_max_age = system_config.get("cache_max_age_hours", 24)
+        
+        cache_params = self.get_caching_params()
+        cache_filepath = get_cache_filepath(
+            cache_dir, 
+            self.config.get('pipeline_name', 'default_context'), 
+            cache_params
+        )
 
+        raw_data = None
+        if cache_enabled:
+            raw_data = load_from_cache(cache_filepath, cache_max_age)
+
+        if raw_data is None:
+            raw_data = self._load_data_from_source()
+            if cache_enabled and not raw_data.empty:
+                save_to_cache(raw_data, cache_filepath)
+
+        target_col, feature_cols = self._get_target_and_feature_cols()
+        # ... (Geri kalan run metodu, bir önceki adımdaki gibi aynı şekilde devam eder)
+        data_to_process = raw_data[feature_cols]
         sequence_length = self.config.get("model_params", {}).get("sequence_length", 60)
         scaled_data = self.scaler.fit_transform(data_to_process)
         
@@ -154,7 +187,6 @@ class TimeSeriesPipeline(BasePipeline):
         self.logger.info("Rapor oluşturuluyor...")
         generate_regression_report(final_results, self.config)
         
-        # DÜZELTME: Worker'a döndürülecek nihai sonuçları JSON uyumlu hale getir
         final_loss = history['loss'][-1] if history.get('loss') else None
         
         return {
