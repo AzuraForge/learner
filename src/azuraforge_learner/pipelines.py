@@ -30,20 +30,15 @@ class BasePipeline(ABC):
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
-        logging.basicConfig(level="INFO", format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s', force=True)
 
     @abstractmethod
     def run(self, callbacks: Optional[List[Callback]] = None) -> Dict[str, Any]:
         pass
 
 class LivePredictionCallback(Callback):
-    def __init__(self, pipeline: 'TimeSeriesPipeline', X_val_scaled: np.ndarray, y_val_scaled: np.ndarray, time_index_val: pd.Index):
+    def __init__(self, pipeline: 'TimeSeriesPipeline'):
         super().__init__()
         self.pipeline = pipeline
-        self.X_val_scaled = X_val_scaled
-        self.y_val_scaled = y_val_scaled
-        self.time_index_val = time_index_val
-        # DÜZELTME: validate_every parametresini config'den al
         self.validate_every = self.pipeline.config.get("training_params", {}).get("validate_every", 5)
         self.last_results: Dict[str, Any] = {}
 
@@ -52,17 +47,20 @@ class LivePredictionCallback(Callback):
         total_epochs = event.payload.get("total_epochs", 1)
 
         if (epoch % self.validate_every == 0 and epoch > 0) or (epoch == total_epochs):
-            if not self.learner: return
+            if not self.learner or not hasattr(self.pipeline, 'X_test'):
+                self.pipeline.logger.warning("Callback couldn't find learner or test data to run live validation.")
+                return
 
-            y_pred_scaled = self.learner.predict(self.X_val_scaled)
+            X_val = self.pipeline.X_test
+            y_val = self.pipeline.y_test
+            time_index_val = self.pipeline.time_index_test
 
-            # DÜZELTME: Ters dönüşüm mantığını merkezileştirip pipeline'dan çağır
-            y_test_unscaled, y_pred_unscaled = self.pipeline._inverse_transform_all(
-                self.y_val_scaled, y_pred_scaled
-            )
+            y_pred_scaled = self.learner.predict(X_val)
+            
+            y_test_unscaled, y_pred_unscaled = self.pipeline._inverse_transform_all(y_val, y_pred_scaled)
             
             validation_payload = {
-                "x_axis": [d.isoformat() for d in self.time_index_val],
+                "x_axis": [d.isoformat() for d in time_index_val],
                 "y_true": y_test_unscaled.tolist(), "y_pred": y_pred_unscaled.tolist(),
                 "x_label": "Tarih", "y_label": self.pipeline._get_target_and_feature_cols()[0]
             }
@@ -76,7 +74,7 @@ class LivePredictionCallback(Callback):
                     'mae': mean_absolute_error(y_test_unscaled, y_pred_unscaled)
                 },
                 "y_true": y_test_unscaled, "y_pred": y_pred_unscaled,
-                "time_index": self.time_index_val, "y_label": self.pipeline._get_target_and_feature_cols()[0]
+                "time_index": time_index_val, "y_label": self.pipeline._get_target_and_feature_cols()[0]
             }
 
 class TimeSeriesPipeline(BasePipeline):
@@ -85,6 +83,9 @@ class TimeSeriesPipeline(BasePipeline):
         self.scaler = MinMaxScaler(feature_range=(-1, 1))
         self.feature_scaler = MinMaxScaler(feature_range=(-1, 1))
         self.learner: Optional[Learner] = None
+        self.X_test: Optional[np.ndarray] = None
+        self.y_test: Optional[np.ndarray] = None
+        self.time_index_test: Optional[pd.Index] = None
 
     @abstractmethod
     def _load_data_from_source(self) -> pd.DataFrame:
@@ -108,7 +109,6 @@ class TimeSeriesPipeline(BasePipeline):
         optimizer = Adam(model.parameters(), lr=lr) if optimizer_type == "adam" else SGD(model.parameters(), lr=lr)
         return Learner(model, MSELoss(), optimizer, callbacks=callbacks)
 
-    # YENİ: Ters dönüşüm için merkezi ve daha basit bir metot
     def _inverse_transform_all(self, y_true_scaled, y_pred_scaled):
         y_true_unscaled_transformed = self.scaler.inverse_transform(y_true_scaled)
         y_pred_unscaled_transformed = self.scaler.inverse_transform(y_pred_scaled)
@@ -126,17 +126,17 @@ class TimeSeriesPipeline(BasePipeline):
     def run(self, callbacks: Optional[List[Callback]] = None) -> Dict[str, Any]:
         self.logger.info(f"'{self.config.get('pipeline_name')}' pipeline başlatılıyor...")
         
-        # ... (Caching mantığı aynı kalıyor) ...
         system_config = self.config.get("system", {})
         cache_enabled = system_config.get("caching_enabled", True)
-        cache_dir = os.getenv("CACHE_DIR", system_config.get("cache_dir", ".cache"))
+        cache_dir = os.getenv("CACHE_DIR", ".cache")
         cache_max_age = system_config.get("cache_max_age_hours", 24)
         
         cache_params = self.get_caching_params()
         cache_filepath = get_cache_filepath(cache_dir, self.config.get('pipeline_name', 'default_context'), cache_params)
 
         raw_data = None
-        if cache_enabled: raw_data = load_from_cache(cache_filepath, cache_max_age)
+        if cache_enabled:
+            raw_data = load_from_cache(cache_filepath, cache_max_age)
         if raw_data is None:
             self.logger.info("Önbellek boş veya geçersiz. Veri kaynaktan çekiliyor...")
             raw_data = self._load_data_from_source()
@@ -145,7 +145,6 @@ class TimeSeriesPipeline(BasePipeline):
 
         target_col, feature_cols = self._get_target_and_feature_cols()
         
-        # DÜZELTME: Veri işleme akışını daha basit ve net hale getir
         features_df = raw_data[feature_cols].copy()
         target_series = raw_data[target_col].copy()
 
@@ -154,11 +153,9 @@ class TimeSeriesPipeline(BasePipeline):
             self.logger.info(f"'{target_col}' sütununa log(1+x) dönüşümü uygulanıyor.")
             target_series = np.log1p(target_series)
         
-        # Hedefi ve özellikleri ayrı ayrı ölçekle
         scaled_features = self.feature_scaler.fit_transform(features_df)
         scaled_target = self.scaler.fit_transform(target_series.values.reshape(-1, 1))
         
-        # Ölçeklenmiş hedefi, ölçeklenmiş özelliklerin sonuna ekle
         scaled_data = np.concatenate([scaled_features, scaled_target], axis=1)
 
         sequence_length = self.config.get("model_params", {}).get("sequence_length", 60)
@@ -169,23 +166,20 @@ class TimeSeriesPipeline(BasePipeline):
 
         test_size = self.config.get("training_params", {}).get("test_size", 0.2)
         split_idx = int(len(X) * (1 - test_size))
-        X_train, X_test = X[:split_idx], X[split_idx:]
-        y_train, y_test = y[:split_idx], y[split_idx:] # y zaten ölçekli
-        time_index_test = raw_data.index[split_idx + sequence_length:]
+        X_train, self.X_test = X[:split_idx], X[split_idx:]
+        y_train, self.y_test = y[:split_idx], y[split_idx:]
+        self.time_index_test = raw_data.index[split_idx + sequence_length:]
 
         model = self._create_model(X_train.shape)
         
-        live_predict_cb = LivePredictionCallback(
-            pipeline=self, X_val=X_test, y_val=y_test, 
-            time_index_val=time_index_test
-        )
+        live_predict_cb = LivePredictionCallback(pipeline=self)
         all_callbacks = (callbacks or []) + [live_predict_cb]
         
         self.learner = self._create_learner(model, all_callbacks)
 
         epochs = int(self.config.get("training_params", {}).get("epochs", 50))
         self.logger.info(f"{epochs} epoch için model eğitimi başlıyor...")
-        history = self.learner.fit(X_train, y, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
+        history = self.learner.fit(X_train, y_train, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
         
         final_results = live_predict_cb.last_results
         if not final_results:
