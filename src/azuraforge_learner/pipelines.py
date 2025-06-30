@@ -24,7 +24,6 @@ def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np
         y = data[i + seq_length]
         xs.append(x)
         ys.append(y)
-    # DÜZELTME: y'nin her zaman (samples, features) şeklinde olmasını sağla
     return np.array(xs), np.array(ys).reshape(-1, data.shape[1])
 
 class BasePipeline(ABC):
@@ -50,40 +49,50 @@ class LivePredictionCallback(Callback):
         epoch = event.payload.get("epoch", 0)
         total_epochs = event.payload.get("total_epochs", 1)
 
-        if (epoch % self.validate_every == 0 and epoch > 0) or (epoch == total_epochs):
+        # Her validate_every epoch'ta veya son epoch'ta tahmin yap
+        if (self.validate_every > 0 and epoch % self.validate_every == 0 and epoch > 0) or \
+           (epoch == total_epochs):
             if not self.learner: return
 
+            # X_val'ı Tenör'e dönüştürmeden önce NumPy dizisi olduğundan emin ol
+            # Learner'ın predict metodu zaten NumPy bekliyor.
             y_pred_scaled = self.learner.predict(self.X_val)
             
             y_test_unscaled, y_pred_unscaled = self.pipeline._inverse_transform_all(
                 self.y_val, y_pred_scaled
             )
             
-            validation_payload = {
+            # === DEĞİŞİKLİK BURADA: validation_data'yı doğru formatta payload'a ekliyoruz ===
+            event.payload['validation_data'] = {
                 "x_axis": [d.isoformat() for d in self.time_index_val],
-                "y_true": y_test_unscaled.tolist(), "y_pred": y_pred_unscaled.tolist(),
-                "x_label": "Tarih", "y_label": self.pipeline._get_target_and_feature_cols()[0]
+                "y_true": y_test_unscaled.tolist(), # NumPy dizisini listeye çevir
+                "y_pred": y_pred_unscaled.tolist(), # NumPy dizisini listeye çevir
+                "x_label": "Tarih", 
+                "y_label": self.pipeline._get_target_and_feature_cols()[0]
             }
-            event.payload['validation_data'] = validation_payload
+            # === DEĞİŞİKLİK SONU ===
             
+            # Metrikleri hesapla ve sakla
             from sklearn.metrics import r2_score, mean_absolute_error
             self.last_results = {
                 "history": self.learner.history,
                 "metrics": {
-                    'r2_score': r2_score(y_test_unscaled, y_pred_unscaled),
-                    'mae': mean_absolute_error(y_test_unscaled, y_pred_unscaled)
+                    'r2_score': float(r2_score(y_test_unscaled, y_pred_unscaled)), # float'a çevir
+                    'mae': float(mean_absolute_error(y_test_unscaled, y_pred_unscaled)) # float'a çevir
                 },
-                "y_true": y_test_unscaled, "y_pred": y_pred_unscaled,
-                "time_index": self.time_index_val, "y_label": self.pipeline._get_target_and_feature_cols()[0]
+                "y_true": y_test_unscaled.tolist(),
+                "y_pred": y_pred_unscaled.tolist(),
+                "time_index": [d.isoformat() for d in self.time_index_val],
+                "y_label": self.pipeline._get_target_and_feature_cols()[0]
             }
 
 class TimeSeriesPipeline(BasePipeline):
+    # ... (kodun geri kalanı aynı) ...
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.scaler = MinMaxScaler(feature_range=(-1, 1))
         self.feature_scaler = MinMaxScaler(feature_range=(-1, 1))
         self.learner: Optional[Learner] = None
-        # Testlerin ve hata ayıklamanın erişebilmesi için sınıf özelliklerini tanımla
         self.X_train: Optional[np.ndarray] = None
         self.y_train: Optional[np.ndarray] = None
         self.X_test: Optional[np.ndarray] = None
@@ -118,6 +127,7 @@ class TimeSeriesPipeline(BasePipeline):
 
         target_transform = self.config.get("feature_engineering", {}).get("target_col_transform")
         if target_transform == 'log':
+            self.logger.info(f"Target column will be exponentiated from log-transformed data.")
             y_true_final = np.expm1(y_true_unscaled_transformed)
             y_pred_final = np.expm1(y_pred_unscaled_transformed)
         else:
@@ -171,17 +181,13 @@ class TimeSeriesPipeline(BasePipeline):
         
         test_size = self.config.get("training_params", {}).get("test_size", 0.2)
         split_idx = int(len(X) * (1 - test_size))
-
-        # === DEĞİŞİKLİK BURADA ===
-        # Değişkenleri sınıf özelliği olarak atıyoruz
         self.X_train, self.X_test = X[:split_idx], X[split_idx:]
         self.y_train, self.y_test = y[:split_idx], y[split_idx:]
-        # === DEĞİŞİKLİK SONU ===
-        
         self.time_index_test = raw_data.index[split_idx + sequence_length:]
 
         model = self._create_model(self.X_train.shape)
         
+        # validate_every kontrolü artık LivePredictionCallback içinde yapılıyor.
         live_predict_cb = LivePredictionCallback(pipeline=self, X_val=self.X_test, y_val=self.y_test, time_index_val=self.time_index_test)
         all_callbacks = (callbacks or []) + [live_predict_cb]
         
@@ -189,23 +195,41 @@ class TimeSeriesPipeline(BasePipeline):
 
         epochs = int(self.config.get("training_params", {}).get("epochs", 50))
         self.logger.info(f"{epochs} epoch için model eğitimi başlıyor...")
-
         history = self.learner.fit(self.X_train, self.y_train, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
         
         final_results = live_predict_cb.last_results
         if not final_results:
-            return {"status": "failed", "message": "Eğitim tamamlanamadı veya hiç doğrulama yapılmadı."}
+            self.logger.warning("Eğitim tamamlandı ancak LivePredictionCallback'den sonuç alınamadı. Manuel olarak toplanıyor.")
+            # Eğer callback'ten sonuç gelmezse, en azından history ve final_loss'u döndür
+            final_results = {
+                "history": history,
+                "final_loss": history['loss'][-1] if history.get('loss') else None,
+                "metrics": {},
+                "y_true": [], "y_pred": [], "time_index": []
+            }
+
 
         self.logger.info("Rapor oluşturuluyor...")
-        generate_regression_report(final_results, self.config)
+        # Raporlamayı sadece gerekli verilerle çağır
+        generate_regression_report(
+            {
+                "metrics": final_results.get('metrics', {}),
+                "history": final_results.get('history', {}),
+                "y_true": final_results.get('y_true', []),
+                "y_pred": final_results.get('y_pred', []),
+                "time_index": final_results.get('time_index', []),
+                "y_label": final_results.get('y_label', self._get_target_and_feature_cols()[0])
+            },
+            self.config
+        )
         
-        final_loss = history['loss'][-1] if history.get('loss') else None
-        
+        final_loss = final_results.get('final_loss')
+
         return {
             "final_loss": final_loss,
             "metrics": final_results.get('metrics', {}),
-            "history": final_results.get('history', {}),
-            "y_true": final_results.get('y_true', np.array([])).tolist(),
-            "y_pred": final_results.get('y_pred', np.array([])).tolist(),
-            "time_index": [d.isoformat() for d in final_results.get('time_index', [])]
+            "history": final_results.get('history', {}), # history'nin tamamını da gönder
+            "y_true": final_results.get('y_true', []),
+            "y_pred": final_results.get('y_pred', []),
+            "time_index": final_results.get('time_index', [])
         }
