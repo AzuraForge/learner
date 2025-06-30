@@ -1,36 +1,55 @@
+# learner/src/azuraforge_learner/callbacks.py
+
 import os
 import numpy as np
-from .events import Event
+from typing import TYPE_CHECKING, Optional, Any
+from .events import Event # Event'i de import edelim
 
-# 'Learner' sınıfı henüz tanımlanmadığı için ileriye dönük referans (forward reference) kullanıyoruz
-from typing import TYPE_CHECKING
+# Döngüsel importu önlemek için, sadece tip kontrolü sırasında Learner'ı import et
 if TYPE_CHECKING:
     from .learner import Learner
 
 class Callback:
     """
-    Tüm callback'lerin temel sınıfı. Olayları dinler ve ilgili metoda yönlendirir.
+    Tüm callback'lerin temel sınıfı.
+    Kendisini çalıştıran Learner'a bir referans tutar.
     """
+    def __init__(self):
+        self.learner: Optional['Learner'] = None
+
+    def set_learner(self, learner: 'Learner'):
+        """Bu metod, Learner tarafından çağrılarak referansı ayarlar."""
+        self.learner = learner
+
     def __call__(self, event: Event):
+        """
+        Gelen olaya göre ilgili metodu (örn: on_epoch_end) çağırır.
+        """
         method = getattr(self, f"on_{event.name}", None)
         if method:
             method(event)
 
-    def on_train_begin(self, event: Event): pass
-    def on_train_end(self, event: Event): pass
-    def on_epoch_begin(self, event: Event): pass
-    def on_epoch_end(self, event: Event): pass
+    # Olay metotları
+    def on_train_begin(self, event: Event) -> None: pass
+    def on_train_end(self, event: Event) -> None: pass
+    def on_epoch_begin(self, event: Event) -> None: pass
+    def on_epoch_end(self, event: Event) -> None: pass
+    def on_batch_begin(self, event: Event) -> None: pass
+    def on_batch_end(self, event: Event) -> None: pass
 
+
+# ÖNEMLİ: ModelCheckpoint ve EarlyStopping sınıflarını koruyoruz ve
+# yeni temel sınıftan miras almalarını sağlıyoruz.
 class ModelCheckpoint(Callback):
     """Her epoch sonunda performansı izler ve sadece en iyi modeli kaydeder."""
     def __init__(self, filepath: str, monitor: str = "val_loss", mode: str = "min", verbose: int = 1):
+        super().__init__() # Temel sınıfın init'ini çağır
         self.filepath = filepath
         self.monitor = monitor
         self.mode = mode
         self.verbose = verbose
         self.best = np.inf if mode == "min" else -np.inf
 
-        # Dosyanın kaydedileceği dizini oluştur
         dir_path = os.path.dirname(self.filepath)
         if dir_path:
             os.makedirs(dir_path, exist_ok=True)
@@ -47,13 +66,16 @@ class ModelCheckpoint(Callback):
 
         if is_better:
             if self.verbose > 0:
-                print(f"ModelCheckpoint: {self.monitor} improved from {self.best:.6f} to {current_val:.6f}. Saving model to {self.filepath}")
+                print(f"ModelCheckpoint: {self.monitor} improved from {self.best:.6f} to {current_val:.6f}. Saving model...")
             self.best = current_val
-            event.learner.save(self.filepath)
+            if self.learner and hasattr(self.learner, 'save_model'): # Learner'da save_model metodu varsa
+                 self.learner.save_model(self.filepath)
+
 
 class EarlyStopping(Callback):
     """Performans belirli bir epoch sayısı boyunca iyileşmediğinde eğitimi durdurur."""
     def __init__(self, monitor: str = "val_loss", patience: int = 10, mode: str = "min", verbose: int = 1):
+        super().__init__() # Temel sınıfın init'ini çağır
         self.monitor = monitor
         self.patience = patience
         self.mode = mode
@@ -62,7 +84,6 @@ class EarlyStopping(Callback):
         self.best = np.inf if mode == "min" else -np.inf
 
     def on_train_begin(self, event: Event):
-        # Eğitimin başında sayaçları sıfırla
         self.wait = 0
         self.best = np.inf if self.mode == "min" else -np.inf
 
@@ -82,4 +103,5 @@ class EarlyStopping(Callback):
             if self.wait >= self.patience:
                 if self.verbose > 0:
                     print(f"EarlyStopping: Stopping training. {self.monitor} did not improve for {self.patience} epochs.")
-                event.learner.stop_training = True
+                if self.learner:
+                    self.learner.stop_training = True
