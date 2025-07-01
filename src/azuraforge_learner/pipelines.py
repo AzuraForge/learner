@@ -24,6 +24,7 @@ def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np
         y = data[i + seq_length]
         xs.append(x)
         ys.append(y)
+    # DÜZELTME: y'nin her zaman (samples, features) şeklinde olmasını sağla
     return np.array(xs), np.array(ys).reshape(-1, data.shape[1])
 
 class BasePipeline(ABC):
@@ -50,36 +51,36 @@ class LivePredictionCallback(Callback):
         total_epochs = event.payload.get("total_epochs", 1)
 
         # Her validate_every epoch'ta veya son epoch'ta tahmin yap
+        # Eğer validate_every 0 veya negatif ise her epoch'ta yap
         if (self.validate_every > 0 and epoch % self.validate_every == 0 and epoch > 0) or \
-           (epoch == total_epochs):
+           (epoch == total_epochs and total_epochs > 0): # Son epoch ise her zaman gönder
             if not self.learner: return
 
-            # X_val'ı Tenör'e dönüştürmeden önce NumPy dizisi olduğundan emin ol
-            # Learner'ın predict metodu zaten NumPy bekliyor.
             y_pred_scaled = self.learner.predict(self.X_val)
             
             y_test_unscaled, y_pred_unscaled = self.pipeline._inverse_transform_all(
                 self.y_val, y_pred_scaled
             )
             
-            # === DEĞİŞİKLİK BURADA: validation_data'yı doğru formatta payload'a ekliyoruz ===
+            # BURADAKİ DÜZELTME: validation_data'yı payload'a ekliyoruz.
+            # tolist() ile NumPy dizilerini JSON serileştirilebilir listelere çevir.
             event.payload['validation_data'] = {
                 "x_axis": [d.isoformat() for d in self.time_index_val],
-                "y_true": y_test_unscaled.tolist(), # NumPy dizisini listeye çevir
-                "y_pred": y_pred_unscaled.tolist(), # NumPy dizisini listeye çevir
+                "y_true": y_test_unscaled.tolist(), 
+                "y_pred": y_pred_unscaled.tolist(), 
                 "x_label": "Tarih", 
                 "y_label": self.pipeline._get_target_and_feature_cols()[0]
             }
-            # === DEĞİŞİKLİK SONU ===
             
-            # Metrikleri hesapla ve sakla
+            # Metrikleri hesapla ve sakla (API'ye nihai results olarak gitmek için)
             from sklearn.metrics import r2_score, mean_absolute_error
             self.last_results = {
                 "history": self.learner.history,
                 "metrics": {
-                    'r2_score': float(r2_score(y_test_unscaled, y_pred_unscaled)), # float'a çevir
-                    'mae': float(mean_absolute_error(y_test_unscaled, y_pred_unscaled)) # float'a çevir
+                    'r2_score': float(r2_score(y_test_unscaled, y_pred_unscaled)), 
+                    'mae': float(mean_absolute_error(y_test_unscaled, y_pred_unscaled))
                 },
+                "final_loss": event.payload.get("loss"), # Son loss değerini de ekle
                 "y_true": y_test_unscaled.tolist(),
                 "y_pred": y_pred_unscaled.tolist(),
                 "time_index": [d.isoformat() for d in self.time_index_val],
@@ -87,7 +88,6 @@ class LivePredictionCallback(Callback):
             }
 
 class TimeSeriesPipeline(BasePipeline):
-    # ... (kodun geri kalanı aynı) ...
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.scaler = MinMaxScaler(feature_range=(-1, 1))
@@ -187,7 +187,6 @@ class TimeSeriesPipeline(BasePipeline):
 
         model = self._create_model(self.X_train.shape)
         
-        # validate_every kontrolü artık LivePredictionCallback içinde yapılıyor.
         live_predict_cb = LivePredictionCallback(pipeline=self, X_val=self.X_test, y_val=self.y_test, time_index_val=self.time_index_test)
         all_callbacks = (callbacks or []) + [live_predict_cb]
         
@@ -200,7 +199,6 @@ class TimeSeriesPipeline(BasePipeline):
         final_results = live_predict_cb.last_results
         if not final_results:
             self.logger.warning("Eğitim tamamlandı ancak LivePredictionCallback'den sonuç alınamadı. Manuel olarak toplanıyor.")
-            # Eğer callback'ten sonuç gelmezse, en azından history ve final_loss'u döndür
             final_results = {
                 "history": history,
                 "final_loss": history['loss'][-1] if history.get('loss') else None,
@@ -223,12 +221,10 @@ class TimeSeriesPipeline(BasePipeline):
             self.config
         )
         
-        final_loss = final_results.get('final_loss')
-
         return {
-            "final_loss": final_loss,
+            "final_loss": final_results.get('final_loss'),
             "metrics": final_results.get('metrics', {}),
-            "history": final_results.get('history', {}), # history'nin tamamını da gönder
+            "history": final_results.get('history', {}), 
             "y_true": final_results.get('y_true', []),
             "y_pred": final_results.get('y_pred', []),
             "time_index": final_results.get('time_index', [])
