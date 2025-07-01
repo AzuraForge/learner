@@ -24,7 +24,6 @@ def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np
         y = data[i + seq_length]
         xs.append(x)
         ys.append(y)
-    # DÜZELTME: y'nin her zaman (samples, features) şeklinde olmasını sağla
     return np.array(xs), np.array(ys).reshape(-1, data.shape[1])
 
 class BasePipeline(ABC):
@@ -43,6 +42,7 @@ class LivePredictionCallback(Callback):
         self.X_val = X_val
         self.y_val = y_val
         self.time_index_val = time_index_val
+        # Düzeltme: validate_every config'den gelmeli, yoksa varsayılan 5.
         self.validate_every = self.pipeline.config.get("training_params", {}).get("validate_every", 5)
         self.last_results: Dict[str, Any] = {}
 
@@ -50,10 +50,18 @@ class LivePredictionCallback(Callback):
         epoch = event.payload.get("epoch", 0)
         total_epochs = event.payload.get("total_epochs", 1)
 
-        # Her validate_every epoch'ta veya son epoch'ta tahmin yap
-        # Eğer validate_every 0 veya negatif ise her epoch'ta yap
-        if (self.validate_every > 0 and epoch % self.validate_every == 0 and epoch > 0) or \
-           (epoch == total_epochs and total_epochs > 0): # Son epoch ise her zaman gönder
+        # BURADAKİ DÜZELTME: validate_every kontrolü.
+        # Eğer validate_every > 0 ise, sadece o aralıklarda ve son epoch'ta gönder.
+        # Eğer validate_every <= 0 ise, her epoch'ta gönder (devre dışı bırakma gibi).
+        should_validate_and_send = False
+        if self.validate_every > 0:
+            if (epoch % self.validate_every == 0 and epoch > 0) or \
+               (epoch == total_epochs and total_epochs > 0): # Son epoch ise her zaman gönder
+                should_validate_and_send = True
+        else: # validate_every 0 veya negatifse, her epoch'ta gönder
+            should_validate_and_send = True
+
+        if should_validate_and_send:
             if not self.learner: return
 
             y_pred_scaled = self.learner.predict(self.X_val)
@@ -62,8 +70,7 @@ class LivePredictionCallback(Callback):
                 self.y_val, y_pred_scaled
             )
             
-            # BURADAKİ DÜZELTME: validation_data'yı payload'a ekliyoruz.
-            # tolist() ile NumPy dizilerini JSON serileştirilebilir listelere çevir.
+            # validation_data'yı payload'a ekliyoruz.
             event.payload['validation_data'] = {
                 "x_axis": [d.isoformat() for d in self.time_index_val],
                 "y_true": y_test_unscaled.tolist(), 
@@ -80,7 +87,7 @@ class LivePredictionCallback(Callback):
                     'r2_score': float(r2_score(y_test_unscaled, y_pred_unscaled)), 
                     'mae': float(mean_absolute_error(y_test_unscaled, y_pred_unscaled))
                 },
-                "final_loss": event.payload.get("loss"), # Son loss değerini de ekle
+                "final_loss": event.payload.get("loss"), 
                 "y_true": y_test_unscaled.tolist(),
                 "y_pred": y_pred_unscaled.tolist(),
                 "time_index": [d.isoformat() for d in self.time_index_val],
