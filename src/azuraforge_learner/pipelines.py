@@ -42,7 +42,6 @@ class LivePredictionCallback(Callback):
         self.X_val = X_val
         self.y_val = y_val
         self.time_index_val = time_index_val
-        # validate_every 0 veya negatif ise her epoch'ta doğrulama yapar
         self.validate_every = self.pipeline.config.get("training_params", {}).get("validate_every", 5)
         self.last_results: Dict[str, Any] = {}
 
@@ -50,55 +49,67 @@ class LivePredictionCallback(Callback):
         epoch = event.payload.get("epoch", 0)
         total_epochs = event.payload.get("total_epochs", 1)
 
-        # Doğrulama ve veri gönderme mantığı:
-        # validate_every 0'dan büyükse ve epoch validate_every'nin katıysa VEYA son epoch'taysa gönder.
-        # validate_every 0 veya daha küçükse (yani her epoch'ta gönder demekse) her zaman gönder.
         should_validate_and_send = False
+        # validate_every 0'dan büyükse ve epoch validate_every'nin katıysa VEYA son epoch'taysa gönder.
         if self.validate_every > 0:
             if (epoch > 0 and epoch % self.validate_every == 0) or \
                (epoch == total_epochs and total_epochs > 0): 
                 should_validate_and_send = True
-        else: # validate_every <= 0 ise, her epoch'ta gönder (örn: 0 veya -1 set edilirse)
+        else: # validate_every <= 0 ise (örn: 0 veya -1 set edilirse), her zaman gönder
             should_validate_and_send = True
         
-        # Ek kontrol: İlk epoch'ta da göndermek istersek
-        if epoch == 1: # İlk epoch'tan itibaren göndermeyi garantilemek için
+        # Ek kontrol: İlk epoch'ta da göndermeyi garantilemek için
+        # Eğer ilk epoch'ta gönderilmiyorsa, grafiğin boş kalma süresi uzar.
+        if epoch == 1 and not should_validate_and_send:
             should_validate_and_send = True
+            logging.info(f"LivePredictionCallback: Force sending validation data on first epoch ({epoch}).")
 
 
         if should_validate_and_send:
-            if not self.learner: return
+            if not self.learner: 
+                logging.warning("LivePredictionCallback: Learner reference not set, cannot perform prediction.")
+                return
 
-            y_pred_scaled = self.learner.predict(self.X_val)
-            
-            y_test_unscaled, y_pred_unscaled = self.pipeline._inverse_transform_all(
-                self.y_val, y_pred_scaled
-            )
-            
-            # BURADAKİ KRİTİK GÜNCELLEME: validation_data'yı payload'a ekliyoruz.
-            # tolist() ile NumPy dizilerini JSON serileştirilebilir listelere çeviriyoruz.
-            event.payload['validation_data'] = {
-                "x_axis": [d.isoformat() for d in self.time_index_val],
-                "y_true": y_test_unscaled.tolist(), 
-                "y_pred": y_pred_unscaled.tolist(), 
-                "x_label": "Tarih", 
-                "y_label": self.pipeline._get_target_and_feature_cols()[0]
-            }
-            
-            # Metrikleri hesapla ve sakla (API'ye nihai results olarak gitmek için)
-            from sklearn.metrics import r2_score, mean_absolute_error
-            self.last_results = {
-                "history": self.learner.history,
-                "metrics": {
-                    'r2_score': float(r2_score(y_test_unscaled, y_pred_unscaled)), 
-                    'mae': float(mean_absolute_error(y_test_unscaled, y_pred_unscaled))
-                },
-                "final_loss": event.payload.get("loss"), # Son loss değerini de ekle
-                "y_true": y_test_unscaled.tolist(),
-                "y_pred": y_pred_unscaled.tolist(),
-                "time_index": [d.isoformat() for d in self.time_index_val],
-                "y_label": self.pipeline._get_target_and_feature_cols()[0]
-            }
+            try:
+                y_pred_scaled = self.learner.predict(self.X_val)
+                
+                y_test_unscaled, y_pred_unscaled = self.pipeline._inverse_transform_all(
+                    self.y_val, y_pred_scaled
+                )
+                
+                # BURADAKİ KRİTİK NOKTA: validation_data'yı payload'a ekliyoruz.
+                event.payload['validation_data'] = {
+                    "x_axis": [d.isoformat() for d in self.time_index_val],
+                    "y_true": y_test_unscaled.tolist(), 
+                    "y_pred": y_pred_unscaled.tolist(), 
+                    "x_label": "Tarih", 
+                    "y_label": self.pipeline._get_target_and_feature_cols()[0]
+                }
+                logging.info(f"LivePredictionCallback: Sent validation data for epoch {epoch}. y_true/y_pred length: {len(y_test_unscaled)}.")
+                
+                # Metrikleri hesapla ve sakla (API'ye nihai results olarak gitmek için)
+                from sklearn.metrics import r2_score, mean_absolute_error
+                self.last_results = {
+                    "history": self.learner.history,
+                    "metrics": {
+                        'r2_score': float(r2_score(y_test_unscaled, y_pred_unscaled)), 
+                        'mae': float(mean_absolute_error(y_test_unscaled, y_pred_unscaled))
+                    },
+                    "final_loss": event.payload.get("loss"), 
+                    "y_true": y_test_unscaled.tolist(),
+                    "y_pred": y_pred_unscaled.tolist(),
+                    "time_index": [d.isoformat() for d in self.time_index_val],
+                    "y_label": self.pipeline._get_target_and_feature_cols()[0]
+                }
+            except Exception as e:
+                logging.error(f"LivePredictionCallback: Error during prediction or data preparation for epoch {epoch}: {e}", exc_info=True)
+                # Hata durumunda bile boş bir validation_data göndererek UI'ın beklememesini sağla
+                event.payload['validation_data'] = {"x_axis": [], "y_true": [], "y_pred": [], "x_label": "", "y_label": ""}
+        else:
+            # Eğer validate_every'ye göre gönderilmemesi gerekiyorsa, payload'da boş bırakıldığından emin ol
+            # Veya bu durumda hiç gönderme (payload'da yoksa UI da göstermez)
+            # Şu anki mantıkta payload'da sadece epoch ve loss olur, validation_data olmaz.
+            logging.debug(f"LivePredictionCallback: Skipping validation data for epoch {epoch} based on validate_every setting.")
 
 class TimeSeriesPipeline(BasePipeline):
     def __init__(self, config: Dict[str, Any]):
@@ -194,13 +205,32 @@ class TimeSeriesPipeline(BasePipeline):
         
         test_size = self.config.get("training_params", {}).get("test_size", 0.2)
         split_idx = int(len(X) * (1 - test_size))
+        
+        # Test setinin boş olmaması için minimum kontrol
+        if split_idx >= len(X):
+            self.logger.error(f"Not enough data to create test set. X_len: {len(X)}, split_idx: {split_idx}.")
+            return {"status": "failed", "message": "Test seti oluşturmak için yeterli veri yok."}
+
         self.X_train, self.X_test = X[:split_idx], X[split_idx:]
         self.y_train, self.y_test = y[:split_idx], y[split_idx:]
-        self.time_index_test = raw_data.index[split_idx + sequence_length:]
+        
+        # time_index_test'in de boş olmadığından emin ol
+        if split_idx + sequence_length >= len(raw_data.index):
+            self.logger.error("Not enough time index data for test set.")
+            self.time_index_test = pd.Index([]) # Boş bir index ata
+        else:
+            self.time_index_test = raw_data.index[split_idx + sequence_length:]
 
         model = self._create_model(self.X_train.shape)
         
-        live_predict_cb = LivePredictionCallback(pipeline=self, X_val=self.X_test, y_val=self.y_test, time_index_val=self.time_index_test)
+        # KRİTİK: LivePredictionCallback'e her zaman geçerli X_val, y_val ve time_index_val gönder
+        # Eğer test seti boşsa, boş NumPy dizileri/Pandas Index göndererek hata oluşumunu engelle.
+        live_predict_cb = LivePredictionCallback(
+            pipeline=self, 
+            X_val=self.X_test if self.X_test.size > 0 else np.array([]), 
+            y_val=self.y_test if self.y_test.size > 0 else np.array([]), 
+            time_index_val=self.time_index_test if not self.time_index_test.empty else pd.Index([])
+        )
         all_callbacks = (callbacks or []) + [live_predict_cb]
         
         self.learner = self._create_learner(model, all_callbacks)
