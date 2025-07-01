@@ -223,15 +223,15 @@ class TimeSeriesPipeline(BasePipeline):
 
         model = self._create_model(self.X_train.shape)
         
-        # KRİTİK: LivePredictionCallback'e her zaman geçerli X_val, y_val ve time_index_val gönder
-        # Eğer test seti boşsa, boş NumPy dizileri/Pandas Index göndererek hata oluşumunu engelle.
+        # KRİTİK DÜZELTME: LivePredictionCallback'i listenin başına alıyoruz ki,
+        # ilgili payload'ı diğer callback'ler işlemeden önce ekleyebilsin.
         live_predict_cb = LivePredictionCallback(
             pipeline=self, 
             X_val=self.X_test if self.X_test.size > 0 else np.array([]), 
             y_val=self.y_test if self.y_test.size > 0 else np.array([]), 
             time_index_val=self.time_index_test if not self.time_index_test.empty else pd.Index([])
         )
-        all_callbacks = (callbacks or []) + [live_predict_cb]
+        all_callbacks = [live_predict_cb] + (callbacks or []) # <--- Bu satır değişti
         
         self.learner = self._create_learner(model, all_callbacks)
 
