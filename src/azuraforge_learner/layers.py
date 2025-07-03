@@ -1,6 +1,6 @@
 from typing import List, Tuple, Optional
 import numpy as np
-from azuraforge_core import Tensor, xp, ArrayType
+from azuraforge_core import Tensor, xp
 
 class Layer:
     def forward(self, x: Tensor) -> Tensor: raise NotImplementedError
@@ -145,19 +145,17 @@ class LSTM(Layer):
         return Tensor(h_all[:, -1, :], _children=(out,), _op="lstm_last_step")
 
 
+
 class Flatten(Layer):
-    """Çok boyutlu girdiyi düzleştirir (batch boyutu hariç)."""
     def __init__(self):
         super().__init__()
         self.input_shape = None
-
     def forward(self, x: Tensor) -> Tensor:
         self.input_shape = x.data.shape
         N = self.input_shape[0]
         return Tensor(x.data.reshape(N, -1), _children=(x,), _op="flatten")
 
 class Conv2D(Layer):
-    """2D Konvolüsyon Katmanı."""
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, padding: int = 1):
         super().__init__()
         self.in_channels = in_channels
@@ -168,22 +166,48 @@ class Conv2D(Layer):
         limit = np.sqrt(2.0 / (in_channels * kernel_size * kernel_size))
         self.weights = Tensor(xp.random.randn(out_channels, in_channels, kernel_size, kernel_size) * limit, requires_grad=True)
         self.bias = Tensor(xp.zeros(out_channels), requires_grad=True)
-
     def forward(self, x: Tensor) -> Tensor:
         return x.conv2d(self.weights, self.bias, self.stride, self.padding)
-
     def parameters(self) -> List[Tensor]:
         return [self.weights, self.bias]
 
 class MaxPool2D(Layer):
-    """2D Maksimum Havuzlama Katmanı."""
     def __init__(self, kernel_size: int = 2, stride: int = 2):
         super().__init__()
         self.kernel_size = kernel_size
         self.stride = stride
-
     def forward(self, x: Tensor) -> Tensor:
         return x.max_pool2d(self.kernel_size, self.stride)
+    def parameters(self) -> List[Tensor]:
+        return []
+
+class Embedding(Layer):
+    """
+    Kelimeleri/token'ları yoğun vektörlere dönüştüren katman.
+    """
+    def __init__(self, num_embeddings: int, embedding_dim: int):
+        super().__init__()
+        # Öğrenilebilir ağırlık matrisini oluştur
+        # Bu matris, sözlükteki her kelime için bir vektör tutar.
+        self.weights = Tensor(
+            xp.random.randn(num_embeddings, embedding_dim) * 0.01,
+            requires_grad=True
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Girdi olarak bir tamsayı tensörü (indeksler) alır ve
+        bu indekslere karşılık gelen embedding vektörlerini döndürür.
+        """
+        # Girdinin tamsayı olduğundan emin ol
+        if x.data.dtype not in [xp.int32, xp.int64]:
+            x_int = xp.asarray(x.data, dtype=xp.int32)
+        else:
+            x_int = x.data
+        
+        # Core'a eklediğimiz __getitem__ metodunu kullanarak
+        # ağırlık matrisinden doğru satırları seçiyoruz.
+        return self.weights[x_int]
 
     def parameters(self) -> List[Tensor]:
-        return [] # Bu katmanın öğrenilebilir parametresi yoktur
+        return [self.weights]
