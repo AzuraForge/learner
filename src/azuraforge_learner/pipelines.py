@@ -266,6 +266,8 @@ class ImageClassificationPipeline(BasePipeline):
             "confusion_matrix": conf_matrix.tolist()
         }
         
-        # generate_classification_report(...)  <-- Bu fonksiyonu daha sonra ekleyeceğiz
+        # --- YENİ SATIR: Rapor oluşturucuyu çağırıyoruz ---
+        from .reporting import generate_classification_report
+        generate_classification_report(final_results, self.config, self.class_names)
         
-        return final_results        
+        return final_results   

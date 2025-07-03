@@ -50,6 +50,93 @@ def plot_prediction_comparison(y_true: np.ndarray, y_pred: np.ndarray, time_inde
     fig.savefig(save_path)
     plt.close(fig)
 
+# ... (plot_prediction_comparison fonksiyonunun sonu)
+import itertools # Dosyanın başında import edildiğinden emin olun
+
+def plot_confusion_matrix(cm, classes, save_path, normalize=False, title='Confusion matrix', cmap=plt.cm.Greens):
+    """
+    Bu fonksiyon, confusion matrix'i çizer ve kaydeder.
+    """
+    if normalize:
+        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    
+    set_professional_style()
+    fig, ax = plt.subplots(figsize=(10, 10))
+    im = ax.imshow(cm, interpolation='nearest', cmap=cmap)
+    ax.set_title(title)
+    fig.colorbar(im)
+    
+    tick_marks = np.arange(len(classes))
+    ax.set_xticks(tick_marks)
+    ax.set_xticklabels(classes, rotation=45, ha="right")
+    ax.set_yticks(tick_marks)
+    ax.set_yticklabels(classes)
+
+    fmt = '.2f' if normalize else 'd'
+    thresh = cm.max() / 2.
+    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+        ax.text(j, i, format(cm[i, j], fmt),
+                 horizontalalignment="center",
+                 color="white" if cm[i, j] > thresh else "black")
+
+    ax.set_ylabel('Gerçek Etiket (True Label)')
+    ax.set_xlabel('Tahmin Edilen Etiket (Predicted Label)')
+    fig.tight_layout()
+    fig.savefig(save_path)
+    plt.close(fig)
+
+def generate_classification_report(results: Dict[str, Any], config: Dict[str, Any], class_names: List[str]):
+    experiment_dir = config.get('experiment_dir')
+    if not experiment_dir:
+        logging.error("Rapor oluşturmak için 'experiment_dir' konfigürasyonda bulunamadı.")
+        return
+        
+    report_name = config.get('pipeline_name', 'Bilinmeyen Deney')
+    img_dir = os.path.join(experiment_dir, "images")
+    os.makedirs(img_dir, exist_ok=True)
+    report_path = os.path.join(experiment_dir, "report.md")
+    logging.info(f"Sınıflandırma raporu oluşturuluyor: {report_path}")
+
+    # Confusion Matrix'i çizdir
+    cm_img_path = os.path.join(img_dir, "confusion_matrix.png")
+    if 'confusion_matrix' in results:
+        cm = np.array(results['confusion_matrix'])
+        plot_confusion_matrix(cm, classes=class_names, save_path=cm_img_path, title='Confusion Matrix')
+
+    metrics = results.get('metrics', {})
+    accuracy = metrics.get('accuracy')
+    class_report = metrics.get('classification_report', {})
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(f"# Sınıflandırma Analiz Raporu: {report_name}\n\n")
+        f.write(f"**Rapor Tarihi:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        
+        f.write("## 1. Performans Özeti\n\n")
+        if accuracy is not None:
+            f.write(f"- **Genel Doğruluk (Accuracy):** `{accuracy:.4f}`\n\n")
+        
+        f.write("### Sınıf Bazında Metrikler\n\n")
+        f.write("| Sınıf | Precision | Recall | F1-Score | Support |\n")
+        f.write("|:---|:---:|:---:|:---:|:---:|\n")
+        for class_name, report_metrics in class_report.items():
+            if isinstance(report_metrics, dict):
+                p = report_metrics.get('precision', 0)
+                r = report_metrics.get('recall', 0)
+                f1 = report_metrics.get('f1-score', 0)
+                s = report_metrics.get('support', 0)
+                f.write(f"| {class_name} | {p:.2f} | {r:.2f} | {f1:.2f} | {s} |\n")
+        f.write("\n")
+        
+        f.write("## 2. Karmaşıklık Matrisi (Confusion Matrix)\n\n")
+        f.write("Bu matris, modelin hangi sınıfları birbiriyle karıştırdığını gösterir.\n\n")
+        if os.path.exists(cm_img_path):
+            f.write(f"![Karmaşıklık Matrisi](images/confusion_matrix.png)\n\n")
+
+        f.write("## 3. Deney Konfigürasyonu\n\n")
+        f.write("```json\n")
+        f.write(json.dumps(config, indent=4, default=str))
+        f.write("\n```\n")    
+
 def generate_regression_report(results: Dict[str, Any], config: Dict[str, Any]):
     experiment_dir = config.get('experiment_dir')
     if not experiment_dir:
