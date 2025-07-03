@@ -25,7 +25,7 @@ class Sigmoid(Layer):
     def forward(self, x: Tensor) -> Tensor:
         return x.sigmoid()
 
-# DÜZELTME: LSTM katmanı tam backward pass ile yeniden yazıldı.
+# ... (LSTM Katmanı burada, içeriği aynı) ...
 class LSTM(Layer):
     def __init__(self, input_size: int, hidden_size: int):
         super().__init__()
@@ -145,7 +145,45 @@ class LSTM(Layer):
         return Tensor(h_all[:, -1, :], _children=(out,), _op="lstm_last_step")
 
 
-    def forward_old(self, x: Tensor) -> Tensor:
-        # Eski forward metodu referans için burada bırakılabilir
-        # ...
-        pass
+class Flatten(Layer):
+    """Çok boyutlu girdiyi düzleştirir (batch boyutu hariç)."""
+    def __init__(self):
+        super().__init__()
+        self.input_shape = None
+
+    def forward(self, x: Tensor) -> Tensor:
+        self.input_shape = x.data.shape
+        N = self.input_shape[0]
+        return Tensor(x.data.reshape(N, -1), _children=(x,), _op="flatten")
+
+class Conv2D(Layer):
+    """2D Konvolüsyon Katmanı."""
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, padding: int = 1):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        limit = np.sqrt(2.0 / (in_channels * kernel_size * kernel_size))
+        self.weights = Tensor(xp.random.randn(out_channels, in_channels, kernel_size, kernel_size) * limit, requires_grad=True)
+        self.bias = Tensor(xp.zeros(out_channels), requires_grad=True)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return x.conv2d(self.weights, self.bias, self.stride, self.padding)
+
+    def parameters(self) -> List[Tensor]:
+        return [self.weights, self.bias]
+
+class MaxPool2D(Layer):
+    """2D Maksimum Havuzlama Katmanı."""
+    def __init__(self, kernel_size: int = 2, stride: int = 2):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride
+
+    def forward(self, x: Tensor) -> Tensor:
+        return x.max_pool2d(self.kernel_size, self.stride)
+
+    def parameters(self) -> List[Tensor]:
+        return [] # Bu katmanın öğrenilebilir parametresi yoktur
