@@ -342,7 +342,82 @@ class AudioGenerationPipeline(BasePipeline):
         self.learner = Learner(model, CrossEntropyLoss(), optimizer, callbacks=callbacks)
 
         epochs = int(training_params.get("epochs", 5))
-        history = self.learner.fit(X_train, y_train, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
+        # ... (eğitim kısmı aynı) ...
+        history = self.learner.fit(X_train, y_train.astype(np.int32), epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
         
-        # ... (şimdilik basit bir sonuç döndürelim) ...
-        return {"history": history}        
+        # --- YENİ BÖLÜM: Örnek Ses Üretme ---
+        self.logger.info("Generating a sample audio clip after training...")
+        # Eğitim verisinden rastgele bir başlangıç sekansı al
+        seed_sequence = X_train[np.random.randint(0, len(X_train))]
+        # 5 saniyelik ses üretelim (8000Hz örnekleme varsayımıyla)
+        sample_rate = self.config.get("data_sourcing", {}).get("sample_rate", 8000)
+        generated_audio_quantized = self.generate(seed_sequence, generation_length=sample_rate * 5)
+        
+        # Mu-Law'ı tersine çevirerek orijinal ses aralığına dönüştür
+        # (Bu adımı şimdilik basitleştiriyoruz)
+        # 8-bit (0-255) -> [-1, 1] -> 16-bit
+        generated_audio_float = (generated_audio_quantized / 255.0 * 2.0) - 1.0
+        generated_audio_16bit = (generated_audio_float * 32767).astype(np.int16)
+        
+        # Üretilen sesi kaydet
+        output_dir = self.config.get("experiment_dir")
+        if output_dir:
+            output_path = os.path.join(output_dir, "generated_sample.wav")
+            wavfile.write(output_path, sample_rate, generated_audio_16bit)
+            self.logger.info(f"Generated audio sample saved to: {output_path}")
+        
+        final_results = {"history": history, "generated_audio_path": output_path if output_dir else None}
+        return final_results     
+
+
+    def generate(self, initial_seed: np.ndarray, generation_length: int) -> np.ndarray:
+        """
+        Eğitilmiş bir modeli kullanarak, verilen bir başlangıç (seed)
+        verisinden yeni ses dalgaları üretir.
+        """
+        if not self.learner or not self.learner.model:
+            raise RuntimeError("Model has not been trained or loaded. Cannot generate audio.")
+        
+        self.logger.info(f"Starting audio generation for {generation_length} samples...")
+        
+        # Başlangıç verisini modelin beklediği Tensor formatına çevir
+        current_sequence = initial_seed.copy()
+        generated_waveform = []
+
+        # Adım adım üret
+        for _ in range(generation_length):
+            # Mevcut sekansı model girdisine hazırla
+            input_tensor = Tensor(current_sequence.reshape(1, -1))
+            
+            # Modelden bir sonraki örnek için logit'leri al
+            # LSTM'den sonra bir Embedding daha eklemeliyiz modelimize.
+            # Şimdilik modelin doğrudan logit döndürdüğünü varsayalım.
+            # Modelimiz: Embedding -> LSTM -> Linear(vocab_size)
+            # Girdi: (1, seq_len) -> Embedding -> (1, seq_len, embed_dim) -> LSTM -> (1, hidden_size) -> Linear -> (1, vocab_size)
+            # LSTM'den sonra sadece son adımdaki çıktıyı almamız lazım.
+            
+            # Modelimizin yapısını basitleştirelim:
+            # Girdi: (N, seq_len) -> Embedding -> (N, seq_len, embed_dim) -> LSTM -> (N, seq_len, vocab_size)
+            # Bu daha doğru bir üretken model yapısı.
+            
+            # Bu varsayımla devam edelim:
+            logits = self.learner.predict(input_tensor) # (1, seq_len, vocab_size)
+            
+            # Sadece son zaman adımındaki logit'leri al
+            last_step_logits = logits[0, -1, :]
+            
+            # Softmax ile olasılıklara çevir
+            probs = np.exp(last_step_logits) / np.sum(np.exp(last_step_logits))
+            
+            # Olasılık dağılımından bir örnek seç
+            next_sample = np.random.choice(len(probs), p=probs)
+            
+            # Üretilen örneği listeye ekle
+            generated_waveform.append(next_sample)
+            
+            # Sekansı bir adım kaydır ve yeni örneği sona ekle
+            current_sequence = np.roll(current_sequence, -1)
+            current_sequence[-1] = next_sample
+            
+        self.logger.info("Audio generation finished.")
+        return np.array(generated_waveform, dtype=np.uint8) # 8-bit varsayıyoruz        
