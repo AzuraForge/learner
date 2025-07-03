@@ -20,6 +20,8 @@ dependencies = [
     "matplotlib",
     "pandas",
     "pyarrow",
+    "torchvision", # <-- YENİ BAĞIMLILIK (Sadece veri setleri için)
+    "torch",       # <-- YENİ BAĞIMLILIK (torchvision için gerekli)    
     "python-semantic-release"
 ]
 

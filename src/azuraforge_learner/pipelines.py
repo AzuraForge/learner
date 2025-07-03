@@ -71,6 +71,7 @@ class LivePredictionCallback(Callback):
 
 
 class TimeSeriesPipeline(BasePipeline):
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.scaler = MinMaxScaler(feature_range=(-1, 1))
@@ -197,3 +198,74 @@ class TimeSeriesPipeline(BasePipeline):
         
         self.logger.info(f"Data prepared for prediction with shape: {model_input.shape}")
         return model_input
+
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+import itertools # Raporlama için gerekli
+
+class ImageClassificationPipeline(BasePipeline):
+    """Görüntü sınıflandırma görevleri için temel pipeline."""
+    
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        self.learner: Optional[Learner] = None
+        self.class_names: Optional[List[str]] = None
+
+    @abstractmethod
+    def _load_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
+        """
+        (X_train, y_train, X_test, y_test, class_names) döndürmelidir.
+        Görüntüler (N, C, H, W) formatında ve [0, 1] aralığında olmalıdır.
+        Etiketler tamsayı olmalıdır.
+        """
+        pass
+
+    @abstractmethod
+    def _create_model(self, input_shape: Tuple, num_classes: int) -> Sequential:
+        """Sınıflandırma için bir Sequential model oluşturur."""
+        pass
+
+    def _create_learner(self, model: Sequential, callbacks: Optional[List[Callback]]) -> Learner:
+        # Sınıflandırma için genellikle Cross-Entropy Loss kullanılır,
+        # ancak şimdilik MSELoss ile başlayabiliriz (daha sonra eklenecek).
+        training_params = self.config.get("training_params", {})
+        lr = float(training_params.get("lr", 0.001))
+        optimizer = Adam(model.parameters(), lr=lr)
+        return Learner(model, MSELoss(), optimizer, callbacks=callbacks)
+
+    def run(self, callbacks: Optional[List[Callback]] = None) -> Dict[str, Any]:
+        self.logger.info(f"'{self.config.get('pipeline_name')}' pipeline başlatılıyor...")
+        
+        X_train, y_train, X_test, y_test, self.class_names = self._load_data()
+        
+        # Etiketleri One-Hot-Encoding formatına çevir (MSELoss için)
+        num_classes = len(self.class_names)
+        y_train_ohe = np.eye(num_classes)[y_train]
+        
+        model = self._create_model(X_train.shape, num_classes)
+        self.learner = self._create_learner(model, callbacks)
+        
+        epochs = int(self.config.get("training_params", {}).get("epochs", 10))
+        history = self.learner.fit(X_train, y_train_ohe, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
+        
+        # Test seti üzerinde değerlendirme yap
+        y_pred_logits = self.learner.predict(X_test)
+        y_pred_labels = np.argmax(y_pred_logits, axis=1)
+        
+        accuracy = accuracy_score(y_test, y_pred_labels)
+        self.logger.info(f"Test Accuracy: {accuracy:.4f}")
+        
+        report = classification_report(y_test, y_pred_labels, target_names=self.class_names, output_dict=True)
+        conf_matrix = confusion_matrix(y_test, y_pred_labels)
+        
+        final_results = {
+            "history": history,
+            "metrics": {
+                "accuracy": accuracy,
+                "classification_report": report
+            },
+            "confusion_matrix": conf_matrix.tolist()
+        }
+        
+        # generate_classification_report(...)  <-- Bu fonksiyonu daha sonra ekleyeceğiz
+        
+        return final_results        
