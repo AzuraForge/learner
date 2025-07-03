@@ -271,3 +271,60 @@ class ImageClassificationPipeline(BasePipeline):
         generate_classification_report(final_results, self.config, self.class_names)
         
         return final_results   
+
+# ... (ImageClassificationPipeline sınıfının sonu) ...
+from scipy.io import wavfile # Ses dosyalarını okumak için yeni bağımlılık
+
+class AudioGenerationPipeline(BasePipeline):
+    """Ses üretimi görevleri için temel pipeline."""
+    
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        self.learner: Optional[Learner] = None
+        self.vocab_size: Optional[int] = None # Ses örneklerinin alabileceği değer sayısı (örn: 256)
+
+    @abstractmethod
+    def _load_data(self) -> np.ndarray:
+        """
+        Eğitim için kullanılacak ham ses verisini (waveform) tek bir
+        NumPy dizisi olarak döndürmelidir. Değerler tamsayı olmalıdır.
+        """
+        pass
+
+    def _create_sequences(self, waveform: np.ndarray, seq_length: int):
+        """Ses verisinden girdi (X) ve hedef (y) sekansları oluşturur."""
+        # X: t anındaki veri, y: t+1 anındaki veri
+        X = [waveform[i:i+seq_length] for i in range(len(waveform) - seq_length -1)]
+        y = [waveform[i+1:i+seq_length+1] for i in range(len(waveform) - seq_length -1)]
+        return np.array(X), np.array(y)
+
+    @abstractmethod
+    def _create_model(self, vocab_size: int) -> Sequential:
+        """Üretken bir ses modeli oluşturur."""
+        pass
+
+    def run(self, callbacks: Optional[List[Callback]] = None) -> Dict[str, Any]:
+        self.logger.info(f"'{self.config.get('pipeline_name')}' pipeline başlatılıyor...")
+        
+        waveform = self._load_data()
+        self.vocab_size = int(waveform.max() + 1)
+        
+        seq_length = self.config.get("model_params", {}).get("sequence_length", 128)
+        X, y = self._create_sequences(waveform, seq_length)
+
+        # Basitlik için tüm veriyi eğitimde kullanalım
+        X_train, y_train = X, y
+
+        model = self._create_model(self.vocab_size)
+        
+        # Üretken modeller için CrossEntropyLoss kullanıyoruz
+        training_params = self.config.get("training_params", {})
+        lr = float(training_params.get("lr", 0.001))
+        optimizer = Adam(model.parameters(), lr=lr)
+        self.learner = Learner(model, CrossEntropyLoss(), optimizer, callbacks=callbacks)
+
+        epochs = int(training_params.get("epochs", 5))
+        history = self.learner.fit(X_train, y_train, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
+        
+        # ... (şimdilik basit bir sonuç döndürelim) ...
+        return {"history": history}        
