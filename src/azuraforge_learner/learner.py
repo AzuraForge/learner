@@ -89,3 +89,11 @@ class Learner:
         val_rmse = np.sqrt(mean_squared_error(y_val_np, y_pred_np))
 
         return {"val_loss": val_loss, "val_r2": val_r2, "val_mae": val_mae, "val_rmse": val_rmse}
+
+    def save_model(self, filepath: str):
+        """Learner'ın modelini kaydeder."""
+        self.model.save(filepath)
+
+    def load_model(self, filepath: str):
+        """Learner'a bir modelin parametrelerini yükler."""
+        self.model.load(filepath)        
