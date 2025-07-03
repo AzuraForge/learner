@@ -2,6 +2,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Tuple, Optional, List
+from pydantic import BaseModel, ValidationError
 
 import numpy as np
 import pandas as pd
@@ -26,9 +27,26 @@ def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np
 
 class BasePipeline(ABC):
     def __init__(self, config: Dict[str, Any]):
-        self.config = config
-        self.logger = logging.getLogger(self.__class__.__name__)
+        # Eski: self.config = config
+        # Yeni:
+        try:
+            # Pydantic modelini al ve konfigürasyonu doğrula/dönüştür
+            ConfigModel = self.get_config_model()
+            self.config = ConfigModel(**config).model_dump()
+            self.logger = logging.getLogger(self.__class__.__name__)
+            self.logger.info(f"Configuration successfully validated for pipeline: {self.config.get('pipeline_name')}")
+        except ValidationError as e:
+            # Bu hata, worker tarafından yakalanıp kullanıcıya gösterilecek.
+            self.logger.error(f"Configuration validation failed: {e}")
+            raise ValueError(f"Invalid configuration provided: {e}") from e
 
+    @abstractmethod
+    def get_config_model(self) -> type[BaseModel]:
+        """
+        Bu pipeline'ın konfigürasyonunu doğrulayacak Pydantic modelini döndürmelidir.
+        """
+        pass
+    
     @abstractmethod
     def run(self, callbacks: Optional[List[Callback]] = None, skip_training: bool = False) -> Dict[str, Any]:
         pass

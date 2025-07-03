@@ -22,6 +22,7 @@ dependencies = [
     "pyarrow",
     "torchvision", # <-- YENİ BAĞIMLILIK (Sadece veri setleri için)
     "torch",       # <-- YENİ BAĞIMLILIK (torchvision için gerekli)    
+    "pydantic", # <-- YENİ BAĞIMLILIK
     "python-semantic-release"
 ]
 
