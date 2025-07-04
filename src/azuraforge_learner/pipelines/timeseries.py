@@ -4,10 +4,13 @@ Zaman serisi pipeline'ları ve ilgili bileşenleri içerir.
 """
 import logging
 import os
+# DÜZELTME: Eksik olan importlar buraya eklendi.
+from abc import abstractmethod
 from typing import Dict, Any, Tuple, Optional, List
 
 import numpy as np
 import pandas as pd
+from pydantic import BaseModel
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 
@@ -56,7 +59,6 @@ class LivePredictionCallback(Callback):
             event.payload['validation_data'] = {
                 "x_axis": [d.isoformat() for d in self.time_index_val],
                 "y_true": y_test_unscaled.tolist(), "y_pred": y_pred_unscaled.tolist(),
-                "x_label": "Tarih", "y_label": self.pipeline.target_col
             }
             from sklearn.metrics import r2_score, mean_absolute_error
             self.last_results = {
@@ -157,6 +159,15 @@ class TimeSeriesPipeline(BasePipeline):
         epochs = int(self.config.get("training_params", {}).get("epochs", 50))
         self.learner.fit(X_train, y_train, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
         final_results = live_predict_cb.last_results
+        if not final_results:
+             y_pred_scaled = self.learner.predict(X_test)
+             y_test_unscaled, y_pred_unscaled = self._inverse_transform_all(y_test, y_pred_scaled)
+             from sklearn.metrics import r2_score, mean_absolute_error
+             final_results = {
+                "history": self.learner.history,
+                "metrics": {'r2_score': float(r2_score(y_test_unscaled, y_pred_unscaled)), 'mae': float(mean_absolute_error(y_test_unscaled, y_pred_unscaled))},
+                "final_loss": self.learner.history.get('loss', [None])[-1]
+             }
         generate_regression_report(final_results, self.config)
         return final_results
     

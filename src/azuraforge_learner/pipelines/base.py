@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List, TYPE_CHECKING
 from pydantic import BaseModel, ValidationError
 
+# Forward-referanslar için, döngüsel importu önler
 if TYPE_CHECKING:
     from ..callbacks import Callback
     from ..learner import Learner
