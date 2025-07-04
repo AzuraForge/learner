@@ -3,7 +3,10 @@
 Ses üretimi pipeline'ları için temel sınıfı içerir.
 """
 import os
-from typing import Dict, Any, Optional, List
+# DÜZELTME: Gerekli tüm importlar eklendi
+from abc import abstractmethod
+from typing import Dict, Any, Optional, Tuple, List
+
 import numpy as np
 from pydantic import BaseModel
 from scipy.io import wavfile
@@ -25,7 +28,7 @@ class AudioGenerationPipeline(BasePipeline):
     def _load_data(self) -> np.ndarray:
         pass
 
-    def _create_sequences(self, waveform: np.ndarray, seq_length: int):
+    def _create_sequences(self, waveform: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np.ndarray]:
         X = [waveform[i:i+seq_length] for i in range(len(waveform) - seq_length -1)]
         y = [waveform[i+1:i+seq_length+1] for i in range(len(waveform) - seq_length -1)]
         return np.array(X), np.array(y)
