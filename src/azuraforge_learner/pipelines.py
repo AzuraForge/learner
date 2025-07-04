@@ -1,22 +1,35 @@
+# learner/src/azuraforge_learner/pipelines.py
+"""
+Bu modül, AzuraForge'daki tüm AI görevleri için temel soyut pipeline
+sınıflarını tanımlar. Pipeline'lar, veri yükleme, ön işleme, model oluşturma,
+eğitim ve raporlama adımlarını kapsayan standart bir arayüz sağlar.
+"""
 import logging
 import os
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Tuple, Optional, List
-from pydantic import BaseModel, ValidationError
 
 import numpy as np
 import pandas as pd
+from pydantic import BaseModel, ValidationError
+from scipy.io import wavfile
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
 from sklearn.preprocessing import MinMaxScaler
 
-from .learner import Learner, Callback
-from .models import Sequential
-from .reporting import generate_regression_report
-from .optimizers import Adam, SGD
-from .losses import MSELoss
-from .events import Event
 from .caching import get_cache_filepath, load_from_cache, save_to_cache
+from .callbacks import Callback
+from .events import Event
+from .learner import Learner
+from .losses import MSELoss, CrossEntropyLoss
+from .models import Sequential
+from .optimizers import Adam, SGD
+from .reporting import generate_classification_report, generate_regression_report
+
+
+# --- Yardımcı Fonksiyonlar ve Sınıflar ---
 
 def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Zaman serisi verisinden girdi (X) ve hedef (y) sekansları oluşturur."""
     xs, ys = [], []
     for i in range(len(data) - seq_length):
         x = data[i:(i + seq_length)]
@@ -25,34 +38,73 @@ def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np
         ys.append(y)
     return np.array(xs), np.array(ys).reshape(-1, data.shape[1] if data.ndim > 1 else -1)
 
+
+# --- TEMEL PIPELINE SINIFI ---
+
 class BasePipeline(ABC):
-    def __init__(self, config: Dict[str, Any]):
-        # Eski: self.config = config
-        # Yeni:
+    """
+    Tüm pipeline'ların miras alması gereken temel sınıf.
+    Konfigürasyon doğrulama ve logger oluşturma gibi ortak işlevleri yönetir.
+    """
+    def __init__(self, full_config: Dict[str, Any]):
+        # 1. Logger'ı her şeyden önce oluştur.
+        self.logger = logging.getLogger(self.__class__.__name__)
+        
+        # 2. Ham, orijinal konfigürasyonu ileride kullanmak üzere sakla.
+        self.raw_config = full_config.copy()
+        
+        # 3. Konfigürasyonu doğrula ve nihai halini `self.config`'e ata.
+        self.config = self._validate_and_prepare_config(full_config)
+        
+        self.learner: Optional[Learner] = None
+        self.logger.info(f"Pipeline '{self.config.get('pipeline_name')}' initialized.")
+
+    def _validate_and_prepare_config(self, full_config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Gelen tam konfigürasyonu, pipeline'ın Pydantic modeline göre doğrular ve
+        sistemsel anahtarları koruyarak nihai konfigürasyonu döndürür.
+        """
         try:
-            # Pydantic modelini al ve konfigürasyonu doğrula/dönüştür
             ConfigModel = self.get_config_model()
-            self.config = ConfigModel(**config).model_dump()
-            self.logger = logging.getLogger(self.__class__.__name__)
-            self.logger.info(f"Configuration successfully validated for pipeline: {self.config.get('pipeline_name')}")
+            if not ConfigModel:
+                self.logger.info("No Pydantic config model provided for this pipeline. Skipping validation.")
+                return full_config
+
+            model_fields = ConfigModel.model_fields.keys()
+            config_for_validation = {k: v for k, v in full_config.items() if k in model_fields}
+            
+            validated_config = ConfigModel(**config_for_validation).model_dump()
+            
+            final_config = self.raw_config.copy()
+            final_config.update(validated_config)
+            return final_config
+            
         except ValidationError as e:
-            # Bu hata, worker tarafından yakalanıp kullanıcıya gösterilecek.
-            self.logger.error(f"Configuration validation failed: {e}")
-            raise ValueError(f"Invalid configuration provided: {e}") from e
+            self.logger.error(f"Pydantic configuration validation failed for {self.__class__.__name__}: {e}", exc_info=True)
+            error_details = "\n".join([f"  - Field '{err['loc'][0]}': {err['msg']}" for err in e.errors()])
+            raise ValueError(f"Invalid configuration provided:\n{error_details}") from e
+        except Exception as e:
+            self.logger.error(f"Unexpected error during config validation: {e}", exc_info=True)
+            raise e
 
     @abstractmethod
-    def get_config_model(self) -> type[BaseModel]:
+    def get_config_model(self) -> Optional[type[BaseModel]]:
         """
-        Bu pipeline'ın konfigürasyonunu doğrulayacak Pydantic modelini döndürmelidir.
+        Pipeline konfigürasyonunu doğrulayacak Pydantic modelini döndürmelidir.
+        Doğrulama istenmiyorsa None dönebilir.
         """
         pass
     
     @abstractmethod
     def run(self, callbacks: Optional[List[Callback]] = None, skip_training: bool = False) -> Dict[str, Any]:
+        """Pipeline'ın ana çalışma mantığını içerir."""
         pass
 
+
+# --- ZAMAN SERİSİ PIPELINE'I ---
+
 class LivePredictionCallback(Callback):
-    # ... Bu sınıfın içeriği aynı kalıyor, değişiklik yok ...
+    """Her 'validate_every' epoch'ta tahmin grafiği için veri üreten callback."""
     def __init__(self, pipeline: 'TimeSeriesPipeline', X_val: np.ndarray, y_val: np.ndarray, time_index_val: pd.Index):
         super().__init__()
         self.pipeline = pipeline
@@ -65,135 +117,210 @@ class LivePredictionCallback(Callback):
     def on_epoch_end(self, event: Event) -> None:
         epoch = event.payload.get("epoch", 0)
         total_epochs = event.payload.get("total_epochs", 1)
-        should_validate = (epoch % self.validate_every == 0) or (epoch == total_epochs) or (epoch == 1)
-        if not should_validate: return
-        if not self.learner: return
+        
+        # Her 'validate_every' epoch'ta, ilk ve son epoch'ta çalış
+        if not (epoch % self.validate_every == 0 or epoch + 1 == total_epochs or epoch == 0):
+            return
+            
+        if not self.learner:
+            self.pipeline.logger.warning("LivePredictionCallback: Learner not set, skipping validation.")
+            return
+        
         try:
             y_pred_scaled = self.learner.predict(self.X_val)
             y_test_unscaled, y_pred_unscaled = self.pipeline._inverse_transform_all(self.y_val, y_pred_scaled)
-            validation_data = {
+            
+            event.payload['validation_data'] = {
                 "x_axis": [d.isoformat() for d in self.time_index_val],
-                "y_true": y_test_unscaled.tolist(), "y_pred": y_pred_unscaled.tolist(),
-                "x_label": "Tarih", "y_label": self.pipeline.target_col
+                "y_true": y_test_unscaled.tolist(),
+                "y_pred": y_pred_unscaled.tolist(),
+                "x_label": "Tarih", 
+                "y_label": self.pipeline.target_col
             }
-            event.payload['validation_data'] = validation_data
+            
             from sklearn.metrics import r2_score, mean_absolute_error
             self.last_results = {
                 "history": self.learner.history,
-                "metrics": {'r2_score': float(r2_score(y_test_unscaled, y_pred_unscaled)), 'mae': float(mean_absolute_error(y_test_unscaled, y_pred_unscaled))},
-                "final_loss": event.payload.get("loss"), "y_true": y_test_unscaled.tolist(), "y_pred": y_pred_unscaled.tolist(),
-                "time_index": [d.isoformat() for d in self.time_index_val], "y_label": self.pipeline.target_col
+                "metrics": {
+                    'r2_score': float(r2_score(y_test_unscaled, y_pred_unscaled)),
+                    'mae': float(mean_absolute_error(y_test_unscaled, y_pred_unscaled))
+                },
+                "final_loss": event.payload.get("loss"),
+                "y_true": y_test_unscaled.tolist(),
+                "y_pred": y_pred_unscaled.tolist(),
+                "time_index": [d.isoformat() for d in self.time_index_val],
+                "y_label": self.pipeline.target_col
             }
         except Exception as e:
-            logging.error(f"LivePredictionCallback Error: {e}", exc_info=True)
+            self.pipeline.logger.error(f"LivePredictionCallback Error: {e}", exc_info=True)
 
 
 class TimeSeriesPipeline(BasePipeline):
-
+    """
+    Zaman serisi verileriyle çalışan pipeline'lar için temel sınıf.
+    Veri önbellekleme, ölçeklendirme ve sekans oluşturma gibi ortak adımları yönetir.
+    """
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.scaler = MinMaxScaler(feature_range=(-1, 1))
+        self.target_scaler = MinMaxScaler(feature_range=(-1, 1))
         self.feature_scaler = MinMaxScaler(feature_range=(-1, 1))
-        self.learner: Optional[Learner] = None
         self.target_col: Optional[str] = None
         self.feature_cols: Optional[List[str]] = None
-        self.is_fitted: bool = False # Scaler'ların eğitilip eğitilmediğini takip eder
+        self.is_fitted: bool = False
 
     @abstractmethod
-    def _load_data_from_source(self) -> pd.DataFrame: pass
-    def get_caching_params(self) -> Dict[str, Any]: return self.config.get("data_sourcing", {})
+    def _load_data_from_source(self) -> pd.DataFrame:
+        """Pipeline'a özel veri kaynağını (API, dosya vb.) yükler."""
+        pass
+
+    def get_caching_params(self) -> Dict[str, Any]:
+        """Önbellek anahtarı oluşturmak için kullanılacak konfigürasyon parametrelerini döndürür."""
+        return self.config.get("data_sourcing", {})
+
     @abstractmethod
-    def _get_target_and_feature_cols(self) -> Tuple[str, List[str]]: pass
+    def _get_target_and_feature_cols(self) -> Tuple[str, List[str]]:
+        """Hedef sütun adını ve özellik sütun adlarının listesini döndürür."""
+        pass
+
     @abstractmethod
-    def _create_model(self, input_shape: Tuple) -> Sequential: pass
+    def _create_model(self, input_shape: Tuple) -> Sequential:
+        """Pipeline'a özel AI modelini oluşturur."""
+        pass
 
     def _create_learner(self, model: Sequential, callbacks: Optional[List[Callback]]) -> Learner:
+        """Verilen model için bir Learner nesnesi oluşturur."""
         training_params = self.config.get("training_params", {})
         lr = float(training_params.get("lr", 0.001))
         optimizer_type = str(training_params.get("optimizer", "adam")).lower()
-        optimizer = Adam(model.parameters(), lr=lr) if optimizer_type == "adam" else SGD(model.parameters(), lr=lr)
+        
+        if optimizer_type == "adam":
+            optimizer = Adam(model.parameters(), lr=lr)
+        elif optimizer_type == "sgd":
+            optimizer = SGD(model.parameters(), lr=lr)
+        else:
+            raise ValueError(f"Unsupported optimizer type: {optimizer_type}")
+            
         return Learner(model, MSELoss(), optimizer, callbacks=callbacks)
 
     def _inverse_transform_all(self, y_true_scaled, y_pred_scaled):
-        y_true_unscaled_transformed = self.scaler.inverse_transform(y_true_scaled)
-        y_pred_unscaled_transformed = self.scaler.inverse_transform(y_pred_scaled)
-        target_transform = self.config.get("feature_engineering", {}).get("target_col_transform")
-        if target_transform == 'log':
-            y_true_final, y_pred_final = np.expm1(y_true_unscaled_transformed), np.expm1(y_pred_unscaled_transformed)
-        else:
-            y_true_final, y_pred_final = y_true_unscaled_transformed, y_pred_unscaled_transformed
-        return y_true_final.flatten(), y_pred_final.flatten()
-
-    def _prepare_scalers(self, raw_data: pd.DataFrame):
-        """Scaler'ları eğitir ve durumu `is_fitted` olarak ayarlar."""
-        if self.is_fitted: return
-        self.logger.info("Preparing and fitting scalers...")
+        """Tahminleri ve gerçek değerleri orijinal ölçeğine geri döndürür."""
+        y_true_unscaled = self.target_scaler.inverse_transform(y_true_scaled)
+        y_pred_unscaled = self.target_scaler.inverse_transform(y_pred_scaled)
+        
+        if self.config.get("feature_engineering", {}).get("target_col_transform") == 'log':
+            y_true_unscaled = np.expm1(y_true_unscaled)
+            y_pred_unscaled = np.expm1(y_pred_unscaled)
+            
+        return y_true_unscaled.flatten(), y_pred_unscaled.flatten()
+        
+    def _fit_scalers(self, data: pd.DataFrame):
+        """Verilen veriye göre hedef ve özellik scaler'larını eğitir."""
+        if self.is_fitted:
+            return
+        self.logger.info("Fitting data scalers...")
         self.target_col, self.feature_cols = self._get_target_and_feature_cols()
-        features_df = raw_data[self.feature_cols].copy()
-        target_series = raw_data[self.target_col].copy()
+        
+        target_series = data[self.target_col].copy()
         if self.config.get("feature_engineering", {}).get("target_col_transform") == 'log':
             target_series = np.log1p(target_series)
-        self.feature_scaler.fit(features_df)
-        self.scaler.fit(target_series.values.reshape(-1, 1))
+            
+        self.target_scaler.fit(target_series.values.reshape(-1, 1))
+        self.feature_scaler.fit(data[self.feature_cols])
         self.is_fitted = True
         self.logger.info("Scalers have been fitted.")
 
-    def run(self, callbacks: Optional[List[Callback]] = None, skip_training: bool = False) -> Dict[str, Any]:
-        self.logger.info(f"'{self.config.get('pipeline_name')}' pipeline running...")
-        
+    def _load_and_cache_data(self) -> pd.DataFrame:
+        """Veriyi önbellekten veya kaynaktan yükler."""
         system_config = self.config.get("system", {})
-        cache_dir = os.getenv("CACHE_DIR", ".cache")
-        raw_data = None
-        if system_config.get("caching_enabled", True):
-            cache_filepath = get_cache_filepath(cache_dir, self.config.get('pipeline_name', 'default'), self.get_caching_params())
-            raw_data = load_from_cache(cache_filepath, system_config.get("cache_max_age_hours", 24))
-        if raw_data is None:
-            raw_data = self._load_data_from_source()
-            if system_config.get("caching_enabled", True) and isinstance(raw_data, pd.DataFrame) and not raw_data.empty:
-                save_to_cache(raw_data, cache_filepath)
+        if not system_config.get("caching_enabled", True):
+            self.logger.info("Caching is disabled. Loading data directly from source.")
+            return self._load_data_from_source()
 
-        self._prepare_scalers(raw_data)
-        if skip_training:
-            self.logger.info("Skipping training. Pipeline run was for data preparation only.")
-            return {"status": "skipped", "message": "Training was skipped."}
+        cache_dir = os.getenv("CACHE_DIR", ".cache")
+        cache_filepath = get_cache_filepath(
+            cache_dir, 
+            self.config.get('pipeline_name', 'default'), 
+            self.get_caching_params()
+        )
         
-        target_series_processed = np.log1p(raw_data[self.target_col]) if self.config.get("feature_engineering", {}).get("target_col_transform") == 'log' else raw_data[self.target_col]
-        scaled_features = self.feature_scaler.transform(raw_data[self.feature_cols])
-        scaled_target = self.scaler.transform(target_series_processed.values.reshape(-1, 1))
+        cached_data = load_from_cache(cache_filepath, system_config.get("cache_max_age_hours", 24))
+        if cached_data is not None:
+            return cached_data
+            
+        self.logger.info("No valid cache found. Loading data from source.")
+        source_data = self._load_data_from_source()
+        if isinstance(source_data, pd.DataFrame) and not source_data.empty:
+            save_to_cache(source_data, cache_filepath)
+            
+        return source_data
         
-        scaled_data = np.concatenate([scaled_features, scaled_target], axis=1)
+    def _prepare_data_for_training(self, data: pd.DataFrame) -> Tuple:
+        """Veriyi ölçekler, sekanslar ve train/test setlerine ayırır."""
+        self.logger.info("Preparing data for training...")
+        self._fit_scalers(data)
+
+        target_series_processed = data[self.target_col].copy()
+        if self.config.get("feature_engineering", {}).get("target_col_transform") == 'log':
+            target_series_processed = np.log1p(target_series_processed)
+
+        scaled_target = self.target_scaler.transform(target_series_processed.values.reshape(-1, 1))
+        
+        # Sadece hedef sütun ile sekans oluşturma (tek değişkenli)
+        # Çok değişkenli modeller için bu kısım genişletilebilir.
         sequence_length = self.config.get("model_params", {}).get("sequence_length", 60)
-        
-        X, y_unsequenced = _create_sequences(scaled_data, sequence_length)
-        if len(X) == 0: raise ValueError(f"Not enough data to create sequences. Need > {sequence_length} rows.")
-        
-        target_idx_in_features = self.feature_cols.index(self.target_col)
-        y = y_unsequenced[:, target_idx_in_features].reshape(-1, 1)
+        X, y = _create_sequences(scaled_target, sequence_length)
+        if len(X) == 0:
+            raise ValueError(f"Not enough data to create sequences. Need > {sequence_length} rows, but got {len(data)}.")
         
         test_size = self.config.get("training_params", {}).get("test_size", 0.2)
-        split_idx = int(len(X) * (1 - test_size))
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, shuffle=False)
         
-        X_train, X_test = X[:split_idx], X[split_idx:]
-        y_train, y_test = y[:split_idx], y[split_idx:]
-        time_index_test = raw_data.index[split_idx + sequence_length:]
+        time_index_test = data.index[len(X_train) + sequence_length:]
 
-        model = self._create_model(X_train.shape)
-        live_predict_cb = LivePredictionCallback(pipeline=self, X_val=X_test, y_val=y_test, time_index_val=time_index_test)
+        self.logger.info(f"Data prepared: X_train shape={X_train.shape}, X_test shape={X_test.shape}")
+        return X_train, y_train, X_test, y_test, time_index_test
+
+    def run(self, callbacks: Optional[List[Callback]] = None, skip_training: bool = False) -> Dict[str, Any]:
+        """Zaman serisi pipeline'ının ana çalışma döngüsü."""
+        self.logger.info(f"Running TimeSeriesPipeline: '{self.config.get('pipeline_name')}'...")
+        
+        raw_data = self._load_and_cache_data()
+
+        if skip_training:
+            self._fit_scalers(raw_data)
+            self.logger.info("`skip_training` is True. Pipeline run finished after data preparation.")
+            return {"status": "skipped", "message": "Training was skipped."}
+
+        X_train, y_train, X_test, y_test, time_index_test = self._prepare_data_for_training(raw_data)
+        
+        # Model girdisi (batch, seq_len, features) şeklinde olmalı
+        model = self._create_model(input_shape=X_train.shape)
+        
+        live_predict_cb = LivePredictionCallback(
+            pipeline=self, X_val=X_test, y_val=y_test, time_index_val=time_index_test
+        )
         all_callbacks = [live_predict_cb] + (callbacks or [])
+        
         self.learner = self._create_learner(model, all_callbacks)
         
         epochs = int(self.config.get("training_params", {}).get("epochs", 50))
-        history = self.learner.fit(X_train, y_train, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
+        self.learner.fit(X_train, y_train, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
         
-        final_results = live_predict_cb.last_results or {"history": history, "final_loss": history['loss'][-1] if history.get('loss') else None}
+        final_results = live_predict_cb.last_results
+        if not final_results:
+             y_pred_scaled = self.learner.predict(X_test)
+             y_test_unscaled, y_pred_unscaled = self._inverse_transform_all(y_test, y_pred_scaled)
+             from sklearn.metrics import r2_score, mean_absolute_error
+             final_results = {
+                "history": self.learner.history,
+                "metrics": {'r2_score': float(r2_score(y_test_unscaled, y_pred_unscaled)), 'mae': float(mean_absolute_error(y_test_unscaled, y_pred_unscaled))},
+                "final_loss": self.learner.history.get('loss', [None])[-1]
+             }
+             
         generate_regression_report(final_results, self.config)
         return final_results
     
     def prepare_data_for_prediction(self, new_data_df: pd.DataFrame) -> np.ndarray:
-        """
-        Dışarıdan gelen yeni veriyi, yüklenmiş bir modelle tahmin yapmak için
-        gerekli formata (ölçeklendirme, sekanslama) sokar.
-        """
         if not self.is_fitted:
             raise RuntimeError("Pipeline scalers are not fitted. Call `run(skip_training=True)` on a historical dataset first.")
         self.logger.info("Preparing new data for prediction...")
@@ -203,221 +330,152 @@ class TimeSeriesPipeline(BasePipeline):
             raise ValueError(f"Prediction data must contain at least {sequence_length} rows.")
             
         relevant_data = new_data_df.tail(sequence_length)
-        if not all(col in relevant_data.columns for col in self.feature_cols):
-            raise ValueError(f"Prediction data is missing required columns: {set(self.feature_cols) - set(relevant_data.columns)}")
-
-        target_series_processed = np.log1p(relevant_data[self.target_col]) if self.config.get("feature_engineering", {}).get("target_col_transform") == 'log' else relevant_data[self.target_col]
         
-        scaled_features = self.feature_scaler.transform(relevant_data[self.feature_cols])
-        scaled_target = self.scaler.transform(target_series_processed.values.reshape(-1, 1))
+        target_series_processed = relevant_data[self.target_col].copy()
+        if self.config.get("feature_engineering", {}).get("target_col_transform") == 'log':
+            target_series_processed = np.log1p(target_series_processed)
         
-        scaled_data = np.concatenate([scaled_features, scaled_target], axis=1)
-        model_input = scaled_data.reshape(1, sequence_length, scaled_data.shape[1])
+        scaled_target = self.target_scaler.transform(target_series_processed.values.reshape(-1, 1))
+        
+        model_input = scaled_target.reshape(1, sequence_length, -1)
         
         self.logger.info(f"Data prepared for prediction with shape: {model_input.shape}")
         return model_input
 
-from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
-import itertools # Raporlama için gerekli
+# --- GÖRÜNTÜ SINIFLANDIRMA PIPELINE'I ---
 
 class ImageClassificationPipeline(BasePipeline):
     """Görüntü sınıflandırma görevleri için temel pipeline."""
     
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
-        self.learner: Optional[Learner] = None
-        self.class_names: Optional[List[str]] = None
+    def get_config_model(self) -> Optional[type[BaseModel]]:
+        return None # Şimdilik bu pipeline için Pydantic doğrulaması yok
 
     @abstractmethod
     def _load_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
-        """
-        (X_train, y_train, X_test, y_test, class_names) döndürmelidir.
-        Görüntüler (N, C, H, W) formatında ve [0, 1] aralığında olmalıdır.
-        Etiketler tamsayı olmalıdır.
-        """
         pass
 
     @abstractmethod
     def _create_model(self, input_shape: Tuple, num_classes: int) -> Sequential:
-        """Sınıflandırma için bir Sequential model oluşturur."""
         pass
 
     def _create_learner(self, model: Sequential, callbacks: Optional[List[Callback]]) -> Learner:
-        # Sınıflandırma için genellikle Cross-Entropy Loss kullanılır,
-        # ancak şimdilik MSELoss ile başlayabiliriz (daha sonra eklenecek).
         training_params = self.config.get("training_params", {})
         lr = float(training_params.get("lr", 0.001))
         optimizer = Adam(model.parameters(), lr=lr)
-        return Learner(model, MSELoss(), optimizer, callbacks=callbacks)
+        return Learner(model, CrossEntropyLoss(), optimizer, callbacks=callbacks)
 
-    def run(self, callbacks: Optional[List[Callback]] = None) -> Dict[str, Any]:
-        self.logger.info(f"'{self.config.get('pipeline_name')}' pipeline başlatılıyor...")
+    def run(self, callbacks: Optional[List[Callback]] = None, skip_training: bool = False) -> Dict[str, Any]:
+        self.logger.info(f"Running ImageClassificationPipeline: '{self.config.get('pipeline_name')}'...")
         
-        X_train, y_train, X_test, y_test, self.class_names = self._load_data()
-        
-        # Etiketleri One-Hot-Encoding formatına çevir (MSELoss için)
-        num_classes = len(self.class_names)
-        y_train_ohe = np.eye(num_classes)[y_train]
+        X_train, y_train, X_test, y_test, class_names = self._load_data()
+        num_classes = len(class_names)
         
         model = self._create_model(X_train.shape, num_classes)
-        self.learner = self._create_learner(model, callbacks)
+        self.learner = self._create_learner(model, callbacks or [])
         
         epochs = int(self.config.get("training_params", {}).get("epochs", 10))
-        history = self.learner.fit(X_train, y_train_ohe, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
+        history = self.learner.fit(X_train, y_train, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
         
-        # Test seti üzerinde değerlendirme yap
+        self.logger.info("Evaluating model on test set...")
         y_pred_logits = self.learner.predict(X_test)
         y_pred_labels = np.argmax(y_pred_logits, axis=1)
         
         accuracy = accuracy_score(y_test, y_pred_labels)
         self.logger.info(f"Test Accuracy: {accuracy:.4f}")
         
-        report = classification_report(y_test, y_pred_labels, target_names=self.class_names, output_dict=True)
+        report = classification_report(y_test, y_pred_labels, target_names=class_names, output_dict=True)
         conf_matrix = confusion_matrix(y_test, y_pred_labels)
         
         final_results = {
             "history": history,
-            "metrics": {
-                "accuracy": accuracy,
-                "classification_report": report
-            },
+            "metrics": { "accuracy": accuracy, "classification_report": report },
             "confusion_matrix": conf_matrix.tolist()
         }
         
-        # --- YENİ SATIR: Rapor oluşturucuyu çağırıyoruz ---
-        from .reporting import generate_classification_report
-        generate_classification_report(final_results, self.config, self.class_names)
-        
-        return final_results   
+        generate_classification_report(final_results, self.config, class_names)
+        return final_results
 
-# ... (ImageClassificationPipeline sınıfının sonu) ...
-from scipy.io import wavfile # Ses dosyalarını okumak için yeni bağımlılık
+
+# --- SES ÜRETİM PIPELINE'I ---
 
 class AudioGenerationPipeline(BasePipeline):
     """Ses üretimi görevleri için temel pipeline."""
-    
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
-        self.learner: Optional[Learner] = None
-        self.vocab_size: Optional[int] = None # Ses örneklerinin alabileceği değer sayısı (örn: 256)
+
+    def get_config_model(self) -> Optional[type[BaseModel]]:
+        return None
 
     @abstractmethod
     def _load_data(self) -> np.ndarray:
-        """
-        Eğitim için kullanılacak ham ses verisini (waveform) tek bir
-        NumPy dizisi olarak döndürmelidir. Değerler tamsayı olmalıdır.
-        """
         pass
 
     def _create_sequences(self, waveform: np.ndarray, seq_length: int):
-        """Ses verisinden girdi (X) ve hedef (y) sekansları oluşturur."""
-        # X: t anındaki veri, y: t+1 anındaki veri
         X = [waveform[i:i+seq_length] for i in range(len(waveform) - seq_length -1)]
         y = [waveform[i+1:i+seq_length+1] for i in range(len(waveform) - seq_length -1)]
         return np.array(X), np.array(y)
 
     @abstractmethod
     def _create_model(self, vocab_size: int) -> Sequential:
-        """Üretken bir ses modeli oluşturur."""
         pass
 
-    def run(self, callbacks: Optional[List[Callback]] = None) -> Dict[str, Any]:
-        self.logger.info(f"'{self.config.get('pipeline_name')}' pipeline başlatılıyor...")
+    def run(self, callbacks: Optional[List[Callback]] = None, skip_training: bool = False) -> Dict[str, Any]:
+        self.logger.info(f"Running AudioGenerationPipeline: '{self.config.get('pipeline_name')}'...")
         
         waveform = self._load_data()
-        self.vocab_size = int(waveform.max() + 1)
+        vocab_size = int(waveform.max() + 1)
         
         seq_length = self.config.get("model_params", {}).get("sequence_length", 128)
-        X, y = self._create_sequences(waveform, seq_length)
+        X_train, y_train = self._create_sequences(waveform, seq_length)
 
-        # Basitlik için tüm veriyi eğitimde kullanalım
-        X_train, y_train = X, y
-
-        model = self._create_model(self.vocab_size)
+        model = self._create_model(vocab_size)
         
-        # Üretken modeller için CrossEntropyLoss kullanıyoruz
         training_params = self.config.get("training_params", {})
         lr = float(training_params.get("lr", 0.001))
         optimizer = Adam(model.parameters(), lr=lr)
         self.learner = Learner(model, CrossEntropyLoss(), optimizer, callbacks=callbacks)
 
         epochs = int(training_params.get("epochs", 5))
-        # ... (eğitim kısmı aynı) ...
         history = self.learner.fit(X_train, y_train.astype(np.int32), epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
         
-        # --- YENİ BÖLÜM: Örnek Ses Üretme ---
         self.logger.info("Generating a sample audio clip after training...")
-        # Eğitim verisinden rastgele bir başlangıç sekansı al
         seed_sequence = X_train[np.random.randint(0, len(X_train))]
-        # 5 saniyelik ses üretelim (8000Hz örnekleme varsayımıyla)
+        
         sample_rate = self.config.get("data_sourcing", {}).get("sample_rate", 8000)
         generated_audio_quantized = self.generate(seed_sequence, generation_length=sample_rate * 5)
         
-        # Mu-Law'ı tersine çevirerek orijinal ses aralığına dönüştür
-        # (Bu adımı şimdilik basitleştiriyoruz)
-        # 8-bit (0-255) -> [-1, 1] -> 16-bit
         generated_audio_float = (generated_audio_quantized / 255.0 * 2.0) - 1.0
         generated_audio_16bit = (generated_audio_float * 32767).astype(np.int16)
         
-        # Üretilen sesi kaydet
+        output_path = None
         output_dir = self.config.get("experiment_dir")
         if output_dir:
             output_path = os.path.join(output_dir, "generated_sample.wav")
             wavfile.write(output_path, sample_rate, generated_audio_16bit)
             self.logger.info(f"Generated audio sample saved to: {output_path}")
         
-        final_results = {"history": history, "generated_audio_path": output_path if output_dir else None}
-        return final_results     
-
+        return {"history": history, "generated_audio_path": output_path}     
 
     def generate(self, initial_seed: np.ndarray, generation_length: int) -> np.ndarray:
-        """
-        Eğitilmiş bir modeli kullanarak, verilen bir başlangıç (seed)
-        verisinden yeni ses dalgaları üretir.
-        """
         if not self.learner or not self.learner.model:
             raise RuntimeError("Model has not been trained or loaded. Cannot generate audio.")
         
         self.logger.info(f"Starting audio generation for {generation_length} samples...")
         
-        # Başlangıç verisini modelin beklediği Tensor formatına çevir
         current_sequence = initial_seed.copy()
         generated_waveform = []
 
-        # Adım adım üret
         for _ in range(generation_length):
-            # Mevcut sekansı model girdisine hazırla
             input_tensor = Tensor(current_sequence.reshape(1, -1))
-            
-            # Modelden bir sonraki örnek için logit'leri al
-            # LSTM'den sonra bir Embedding daha eklemeliyiz modelimize.
-            # Şimdilik modelin doğrudan logit döndürdüğünü varsayalım.
-            # Modelimiz: Embedding -> LSTM -> Linear(vocab_size)
-            # Girdi: (1, seq_len) -> Embedding -> (1, seq_len, embed_dim) -> LSTM -> (1, hidden_size) -> Linear -> (1, vocab_size)
-            # LSTM'den sonra sadece son adımdaki çıktıyı almamız lazım.
-            
-            # Modelimizin yapısını basitleştirelim:
-            # Girdi: (N, seq_len) -> Embedding -> (N, seq_len, embed_dim) -> LSTM -> (N, seq_len, vocab_size)
-            # Bu daha doğru bir üretken model yapısı.
-            
-            # Bu varsayımla devam edelim:
-            logits = self.learner.predict(input_tensor) # (1, seq_len, vocab_size)
-            
-            # Sadece son zaman adımındaki logit'leri al
+            logits = self.learner.predict(input_tensor) 
             last_step_logits = logits[0, -1, :]
             
-            # Softmax ile olasılıklara çevir
             probs = np.exp(last_step_logits) / np.sum(np.exp(last_step_logits))
             
-            # Olasılık dağılımından bir örnek seç
             next_sample = np.random.choice(len(probs), p=probs)
             
-            # Üretilen örneği listeye ekle
             generated_waveform.append(next_sample)
             
-            # Sekansı bir adım kaydır ve yeni örneği sona ekle
             current_sequence = np.roll(current_sequence, -1)
             current_sequence[-1] = next_sample
             
         self.logger.info("Audio generation finished.")
-        return np.array(generated_waveform, dtype=np.uint8) # 8-bit varsayıyoruz        
+        return np.array(generated_waveform, dtype=np.uint8)
