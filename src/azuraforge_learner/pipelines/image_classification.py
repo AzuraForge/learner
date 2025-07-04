@@ -2,7 +2,7 @@
 """
 Görüntü sınıflandırma pipeline'ları için temel sınıfı içerir.
 """
-# DÜZELTME: Gerekli tüm importlar eklendi
+# DÜZELTME: Gerekli tüm importlar eklendi.
 from abc import abstractmethod
 from typing import Dict, Any, Tuple, Optional, List
 import numpy as np
