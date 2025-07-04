@@ -18,7 +18,6 @@ from ..losses import MSELoss
 from ..models import Sequential
 from ..optimizers import Adam, SGD
 from ..reporting import generate_regression_report
-# _load_and_cache_data fonksiyonları artık burada olmadığı için caching importları kaldırıldı.
 
 def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np.ndarray]:
     xs, ys = [], []
@@ -30,7 +29,6 @@ def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np
     return np.array(xs), np.array(ys).reshape(-1, data.shape[1] if data.ndim > 1 else -1)
 
 class LivePredictionCallback(Callback):
-    # ... (Bu sınıf aynı kalıyor, değişiklik yok) ...
     def __init__(self, pipeline: 'TimeSeriesPipeline', X_val: np.ndarray, y_val: np.ndarray, time_index_val: pd.Index):
         super().__init__()
         self.pipeline = pipeline
@@ -68,7 +66,6 @@ class LivePredictionCallback(Callback):
 
 
 class TimeSeriesPipeline(BasePipeline):
-    """Zaman serisi verileriyle çalışan pipeline'lar için temel sınıf."""
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.target_scaler = MinMaxScaler(feature_range=(-1, 1))
@@ -86,7 +83,6 @@ class TimeSeriesPipeline(BasePipeline):
     def _create_model(self, input_shape: Tuple) -> Sequential: pass
 
     def _create_learner(self, model: Sequential, callbacks: Optional[List[Callback]]) -> Learner:
-        # ... (Bu fonksiyon aynı kalıyor, değişiklik yok) ...
         training_params = self.config.get("training_params", {})
         lr = float(training_params.get("lr", 0.001))
         optimizer_type = str(training_params.get("optimizer", "adam")).lower()
@@ -96,7 +92,6 @@ class TimeSeriesPipeline(BasePipeline):
         return Learner(model, MSELoss(), optimizer, callbacks=callbacks)
 
     def _inverse_transform_all(self, y_true_scaled, y_pred_scaled):
-        # ... (Bu fonksiyon aynı kalıyor, değişiklik yok) ...
         y_true_unscaled = self.target_scaler.inverse_transform(y_true_scaled)
         y_pred_unscaled = self.target_scaler.inverse_transform(y_pred_scaled)
         if self.config.get("feature_engineering", {}).get("target_col_transform") == 'log':
@@ -115,42 +110,26 @@ class TimeSeriesPipeline(BasePipeline):
         self.is_fitted = True
         self.logger.info("Scalers have been fitted.")
 
-    # === KALDIRILDI: Bu fonksiyon artık worker/tasks/training_tasks.py'de yönetiliyor ===
-    # def _load_and_cache_data(self) -> pd.DataFrame:
-    #     ...
-
     def _prepare_data_for_training(self, data: pd.DataFrame) -> Tuple:
         self.logger.info("Preparing data for training...")
         self._fit_scalers(data)
         
-        # === YENİ: data_limit parametresini kullanma ===
         data_sourcing_config = self.config.get("data_sourcing", {})
         data_limit = data_sourcing_config.get("data_limit")
         if data_limit and isinstance(data_limit, int) and data_limit > 0:
             self.logger.info(f"Applying data limit: Using last {data_limit} rows.")
             data = data.tail(data_limit)
-        # === DEĞİŞİKLİK SONU ===
 
-        target_series_processed = data[self.target_col].copy()
-        if self.config.get("feature_engineering", {}).get("target_col_transform") == 'log':
-            target_series_processed = np.log1p(target_series_processed)
-        
-        # === DEĞİŞİKLİK: Özellikleri de ölçekle ===
         scaled_features = self.feature_scaler.transform(data[self.feature_cols])
-        # === DEĞİŞİKLİK SONU ===
-        
         sequence_length = self.config.get("model_params", {}).get("sequence_length", 60)
         
-        # === DEĞİŞİKLİK: Artık tüm ölçeklenmiş özellikleri kullanıyoruz ===
         X, y = _create_sequences(scaled_features, sequence_length)
-        # Hedef sütunu (y) alırken, orijinal hedef sütununun ölçeklenmiş halini kullanmamız gerek.
-        # scaled_features içindeki hedef sütunun indeksini bulalım.
+        
         try:
             target_col_index = self.feature_cols.index(self.target_col)
-            y = y[:, target_col_index] # Sadece hedef sütunu al
+            y = y[:, target_col_index] 
         except (ValueError, IndexError):
              raise ValueError(f"Target column '{self.target_col}' not found in feature columns.")
-        # === DEĞİŞİKLİK SONU ===
         
         if len(X) == 0: raise ValueError(f"Not enough data to create sequences (need > {sequence_length} rows).")
         test_size = self.config.get("training_params", {}).get("test_size", 0.2)
@@ -160,7 +139,6 @@ class TimeSeriesPipeline(BasePipeline):
         self.logger.info(f"Data prepared: X_train shape={X_train.shape}, X_test shape={X_test.shape}")
         return X_train, y_train, X_test, y_test, time_index_test
 
-    # === DEĞİŞİKLİK: run metodu artık 'raw_data' argümanı alıyor ===
     def run(self, raw_data: pd.DataFrame, callbacks: Optional[List[Callback]] = None, skip_training: bool = False) -> Dict[str, Any]:
         self.logger.info(f"Running TimeSeriesPipeline: '{self.config.get('pipeline_name')}'...")
 
@@ -196,10 +174,7 @@ class TimeSeriesPipeline(BasePipeline):
         if len(new_data_df) < sequence_length: raise ValueError(f"Prediction data must have at least {sequence_length} rows.")
         
         relevant_data = new_data_df.tail(sequence_length)
-        
-        # === DEĞİŞİKLİK: Sadece hedefi değil, tüm özellikleri ölçekle ===
         scaled_features = self.feature_scaler.transform(relevant_data[self.feature_cols])
-        # === DEĞİŞİKLİK SONU ===
         
         model_input = scaled_features.reshape(1, sequence_length, -1)
         return model_input
