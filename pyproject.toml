@@ -20,18 +20,24 @@ dependencies = [
     "matplotlib",
     "pandas",
     "pyarrow",
-    "torchvision", # <-- YENİ BAĞIMLILIK (Sadece veri setleri için)
-    "torch",       # <-- YENİ BAĞIMLILIK (torchvision için gerekli)    
-    "pydantic", # <-- YENİ BAĞIMLILIK
+    "torchvision", 
+    "torch",       
+    "pydantic", 
     "scipy",
     "python-semantic-release"
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = [
+    "pytest",
+    "flake8" # <-- YENİ
+]
 
+# YENİ BÖLÜM
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
+testpaths = [
+    "tests",
+]
 
 [tool.semantic_release]
 branch = "main"
