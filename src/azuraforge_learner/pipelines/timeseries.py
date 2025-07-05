@@ -165,6 +165,12 @@ class TimeSeriesPipeline(BasePipeline):
                 "final_loss": self.learner.history.get('loss', [None])[-1]
              }
         
+        # === DEĞİŞİKLİK BAŞLANGICI: Sonuçları zenginleştiriyoruz ===
+        # Nihai sonuçlar sözlüğüne, tahmin için gereken sütun bilgilerini ekle.
+        final_results['target_col'] = self.target_col
+        final_results['feature_cols'] = self.feature_cols
+        # === DEĞİŞİKLİK SONU ===
+
         generate_regression_report(final_results, self.config)
         return final_results
     
