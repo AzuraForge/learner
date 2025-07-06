@@ -12,14 +12,13 @@ from .optimizers import Optimizer
 from .callbacks import Callback
 
 class Learner:
-    def __init__(self, model: Sequential, criterion: Loss, optimizer: Optimizer, callbacks: Optional[List[Callback]] = None):
+    # === DEĞİŞİKLİK BURADA: criterion ve optimizer artık isteğe bağlı (Optional) ===
+    def __init__(self, model: Sequential, criterion: Optional[Loss] = None, optimizer: Optional[Optimizer] = None, callbacks: Optional[List[Callback]] = None):
         self.model = model
         self.criterion = criterion
         self.optimizer = optimizer
         self.callbacks = callbacks or []
         
-        # KRİTİK DÜZELTME: Tüm callback'lere bu learner örneğini tanıt.
-        # Bu, callback'lerin `self.learner` üzerinden `predict` gibi metotlara erişmesini sağlar.
         for cb in self.callbacks:
             cb.set_learner(self)
                  
@@ -33,6 +32,10 @@ class Learner:
             cb(event)
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray, epochs: int, pipeline_name: str = "Bilinmiyor"):
+        # === DEĞİŞİKLİK BURADA: Eğitimden önce criterion ve optimizer'ın varlığını kontrol et ===
+        if not self.criterion or not self.optimizer:
+            raise RuntimeError("Cannot fit the model without a criterion and an optimizer.")
+            
         self.history = {"loss": []}
         X_train_t, y_train_t = Tensor(X_train), Tensor(y_train)
         
@@ -74,6 +77,9 @@ class Learner:
         return predictions_tensor.to_cpu()
 
     def evaluate(self, X_val: np.ndarray, y_val: np.ndarray) -> Dict[str, float]:
+        if not self.criterion:
+            raise RuntimeError("Cannot evaluate the model without a criterion.")
+            
         from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
         
         y_val_t = Tensor(y_val)
@@ -96,4 +102,4 @@ class Learner:
 
     def load_model(self, filepath: str):
         """Learner'a bir modelin parametrelerini yükler."""
-        self.model.load(filepath)        
+        self.model.load(filepath)
