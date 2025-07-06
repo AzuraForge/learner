@@ -1,5 +1,3 @@
-# learner/src/azuraforge_learner/learner.py
-
 import time
 from typing import Any, Dict, List, Optional
 import numpy as np
@@ -12,7 +10,6 @@ from .optimizers import Optimizer
 from .callbacks import Callback
 
 class Learner:
-    # === DEĞİŞİKLİK BURADA: criterion ve optimizer artık isteğe bağlı (Optional) ===
     def __init__(self, model: Sequential, criterion: Optional[Loss] = None, optimizer: Optional[Optimizer] = None, callbacks: Optional[List[Callback]] = None):
         self.model = model
         self.criterion = criterion
@@ -26,13 +23,11 @@ class Learner:
         self.stop_training: bool = False
 
     def _publish(self, event_name: str, payload: Optional[Dict[str, Any]] = None):
-        """Olayı tüm callback'lere yayınlar."""
         event = Event(name=event_name, learner=self, payload=payload or {})
         for cb in self.callbacks:
             cb(event)
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray, epochs: int, pipeline_name: str = "Bilinmiyor"):
-        # === DEĞİŞİKLİK BURADA: Eğitimden önce criterion ve optimizer'ın varlığını kontrol et ===
         if not self.criterion or not self.optimizer:
             raise RuntimeError("Cannot fit the model without a criterion and an optimizer.")
             
@@ -48,7 +43,19 @@ class Learner:
             self._publish("epoch_begin", payload={"epoch": epoch, "total_epochs": epochs, "pipeline_name": pipeline_name})
             
             y_pred = self.model(X_train_t)
-            loss = self.criterion(y_pred, y_train_t)
+            
+            # --- KRİTİK DÜZELTME BURADA BAŞLIYOR ---
+            # Eğer modelin çıktısı (y_pred) 3 boyutlu ise (N, T, F),
+            # bu bir zaman serisi modelidir ve kayıp hesabı için sadece son zaman adımını
+            # kullanmamız gerekir.
+            if y_pred.data.ndim == 3 and y_train_t.data.ndim == 2:
+                # y_pred'in şekli (batch, seq_len, features) -> son adımı al -> (batch, features)
+                y_pred_for_loss = y_pred[:, -1, :]
+            else:
+                y_pred_for_loss = y_pred
+            
+            loss = self.criterion(y_pred_for_loss, y_train_t)
+            # --- KRİTİK DÜZELTME BURADA BİTİYOR ---
             
             self.optimizer.zero_grad()
             loss.backward()
@@ -85,9 +92,16 @@ class Learner:
         y_val_t = Tensor(y_val)
         y_pred_t = self.model(Tensor(X_val))
         
-        val_loss = self.criterion(y_pred_t, y_val_t).to_cpu().item()
-        y_pred_np = y_pred_t.to_cpu()
+        # --- DEĞERLENDİRME İÇİN DE AYNI DÜZELTME ---
+        if y_pred_t.data.ndim == 3 and y_val_t.data.ndim == 2:
+            y_pred_for_eval = y_pred_t[:, -1, :]
+        else:
+            y_pred_for_eval = y_pred_t
         
+        val_loss = self.criterion(y_pred_for_eval, y_val_t).to_cpu().item()
+        y_pred_np = y_pred_for_eval.to_cpu()
+        # --- BİTTİ ---
+
         y_val_np = y_val if isinstance(y_val, np.ndarray) else np.array(y_val)
         
         val_r2 = r2_score(y_val_np, y_pred_np)
@@ -97,9 +111,7 @@ class Learner:
         return {"val_loss": val_loss, "val_r2": val_r2, "val_mae": val_mae, "val_rmse": val_rmse}
 
     def save_model(self, filepath: str):
-        """Learner'ın modelini kaydeder."""
         self.model.save(filepath)
 
     def load_model(self, filepath: str):
-        """Learner'a bir modelin parametrelerini yükler."""
         self.model.load(filepath)
