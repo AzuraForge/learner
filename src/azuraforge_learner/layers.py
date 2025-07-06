@@ -25,7 +25,6 @@ class Sigmoid(Layer):
     def forward(self, x: Tensor) -> Tensor:
         return x.sigmoid()
 
-# ... (LSTM Katmanı burada, içeriği aynı) ...
 class LSTM(Layer):
     def __init__(self, input_size: int, hidden_size: int):
         super().__init__()
@@ -81,7 +80,10 @@ class LSTM(Layer):
             o_all[:, t, :] = o
             g_all[:, t, :] = g
 
-        # Çıktı olarak tüm zaman adımlarındaki gizli durumları döndür
+        # === KRİTİK DÜZELTME: Çıktı olarak TÜM ZAMAN adımlarını içeren tensörü döndür ===
+        # Önceki versiyon, sadece son zaman adımını alıp yeni bir tensör oluşturuyordu,
+        # bu da gradyan akışını bozuyordu. Şimdi, tüm ara değerleri içeren `out` tensörünü
+        # doğrudan döndürerek gradyanların doğru şekilde yayılmasını sağlıyoruz.
         out = Tensor(h_all, _children=(x, self.W_x, self.W_h, self.b), _op="lstm", requires_grad=x.requires_grad)
         
         # Geriye yayılım için gerekli tüm ara değerleri sakla
@@ -95,7 +97,6 @@ class LSTM(Layer):
             _N, _T, _D = x_data.shape
             _H = self.hidden_size
             
-            # Başlangıç gradyanları
             dx = xp.zeros_like(x_data)
             dW_x = xp.zeros_like(self.W_x.data)
             dW_h = xp.zeros_like(self.W_h.data)
@@ -107,7 +108,6 @@ class LSTM(Layer):
             for t in reversed(range(_T)):
                 dh = out.grad[:, t, :] + dh_next
                 
-                # Geriye yayılım adımları
                 dc = dc_next + dh * o_data[:, t, :] * (1 - xp.tanh(c_data[:, t, :])**2)
                 
                 di = dc * g_data[:, t, :]
@@ -122,7 +122,6 @@ class LSTM(Layer):
                 
                 dgates = xp.concatenate((d_gates_i, d_gates_f, d_gates_o, d_gates_g), axis=1)
 
-                # Gradyanları biriktir
                 x_t = x_data[:, t, :]
                 h_prev = h_data[:, t-1, :] if t > 0 else xp.zeros((_N, _H))
                 
@@ -134,16 +133,13 @@ class LSTM(Layer):
                 dW_h += h_prev.T @ dgates
                 db += xp.sum(dgates, axis=0)
 
-            # Hesaplanan gradyanları tensörlere ata
             if x.requires_grad and x.grad is not None: x.grad += dx
             if self.W_x.requires_grad and self.W_x.grad is not None: self.W_x.grad += dW_x
             if self.W_h.requires_grad and self.W_h.grad is not None: self.W_h.grad += dW_h
             if self.b.requires_grad and self.b.grad is not None: self.b.grad += db
 
         out._backward = _backward
-        # Sadece son gizli durumu döndürerek uyumluluğu koru
-        return Tensor(h_all[:, -1, :], _children=(out,), _op="lstm_last_step")
-
+        return out
 
 
 class Flatten(Layer):
@@ -153,7 +149,16 @@ class Flatten(Layer):
     def forward(self, x: Tensor) -> Tensor:
         self.input_shape = x.data.shape
         N = self.input_shape[0]
-        return Tensor(x.data.reshape(N, -1), _children=(x,), _op="flatten")
+        # Düzeltme: Flatten işlemi için yeni bir tensör oluştururken,
+        # gradyanın doğru akabilmesi için ata (child) tensörü belirtiyoruz.
+        out = Tensor(x.data.reshape(N, -1), _children=(x,), _op="flatten", requires_grad=x.requires_grad)
+        
+        def _backward():
+            if x.requires_grad and x.grad is not None:
+                x.grad += out.grad.reshape(self.input_shape)
+        
+        out._backward = _backward
+        return out
 
 class Conv2D(Layer):
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, padding: int = 1):
@@ -182,31 +187,18 @@ class MaxPool2D(Layer):
         return []
 
 class Embedding(Layer):
-    """
-    Kelimeleri/token'ları yoğun vektörlere dönüştüren katman.
-    """
     def __init__(self, num_embeddings: int, embedding_dim: int):
         super().__init__()
-        # Öğrenilebilir ağırlık matrisini oluştur
-        # Bu matris, sözlükteki her kelime için bir vektör tutar.
         self.weights = Tensor(
             xp.random.randn(num_embeddings, embedding_dim) * 0.01,
             requires_grad=True
         )
 
     def forward(self, x: Tensor) -> Tensor:
-        """
-        Girdi olarak bir tamsayı tensörü (indeksler) alır ve
-        bu indekslere karşılık gelen embedding vektörlerini döndürür.
-        """
-        # Girdinin tamsayı olduğundan emin ol
         if x.data.dtype not in [xp.int32, xp.int64]:
             x_int = xp.asarray(x.data, dtype=xp.int32)
         else:
             x_int = x.data
-        
-        # Core'a eklediğimiz __getitem__ metodunu kullanarak
-        # ağırlık matrisinden doğru satırları seçiyoruz.
         return self.weights[x_int]
 
     def parameters(self) -> List[Tensor]:
@@ -214,45 +206,26 @@ class Embedding(Layer):
 
 
 class Attention(Layer):
-    """
-    Basit bir scaled dot-product attention katmanı.
-    """
     def __init__(self, input_dim: int, embed_dim: int):
         super().__init__()
         self.embed_dim = embed_dim
-        
-        # Sorgu (Query), Anahtar (Key) ve Değer (Value) için lineer katmanlar
         self.key_proj = Linear(input_dim, embed_dim)
         self.query_proj = Linear(input_dim, embed_dim)
         self.value_proj = Linear(input_dim, embed_dim)
 
     def forward(self, x: Tensor) -> Tensor:
-        """
-        Girdi x'i hem sorgu, anahtar hem de değer kaynağı olarak kullanır (self-attention).
-        Girdi şekli: (batch_size, seq_len, input_dim)
-        """
-        # 1. Girdiyi Q, K, V vektörlerine projekte et
-        q = self.query_proj(x) # (N, seq_len, embed_dim)
-        k = self.key_proj(x)   # (N, seq_len, embed_dim)
-        v = self.value_proj(x) # (N, seq_len, embed_dim)
+        q = self.query_proj(x)
+        k = self.key_proj(x)
+        v = self.value_proj(x)
         
-        # 2. Dikkat skorlarını hesapla: Q * K^T
-        # K'nin son iki boyutunu transpoze etmeliyiz: (N, embed_dim, seq_len)
         k_t = k.transpose(0, 2, 1)
-        scores = q.dot(k_t) # (N, seq_len, seq_len)
+        scores = q.dot(k_t)
         
-        # 3. Skorları ölçekle (scaled)
         scaled_scores = scores * (self.embed_dim ** -0.5)
-        
-        # 4. Softmax uygulayarak dikkat ağırlıklarını (attention weights) bul
         attention_weights = scaled_scores.softmax(axis=-1)
         
-        # 5. Ağırlıkları V (değerler) ile çarparak nihai çıktıyı oluştur
-        # attention_weights: (N, seq_len, seq_len) @ v: (N, seq_len, embed_dim) -> (N, seq_len, embed_dim)
         context = attention_weights.dot(v)
-        
         return context
 
     def parameters(self) -> List[Tensor]:
-        # Tüm alt katmanların parametrelerini topla
-        return self.key_proj.parameters() + self.query_proj.parameters() + self.value_proj.parameters()        
+        return self.key_proj.parameters() + self.query_proj.parameters() + self.value_proj.parameters()
