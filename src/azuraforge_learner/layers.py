@@ -80,17 +80,18 @@ class LSTM(Layer):
             o_all[:, t, :] = o
             g_all[:, t, :] = g
 
-        # === KRİTİK DÜZELTME: Çıktı olarak TÜM ZAMAN adımlarını içeren tensörü döndür ===
-        # Önceki versiyon, sadece son zaman adımını alıp yeni bir tensör oluşturuyordu,
-        # bu da gradyan akışını bozuyordu. Şimdi, tüm ara değerleri içeren `out` tensörünü
-        # doğrudan döndürerek gradyanların doğru şekilde yayılmasını sağlıyoruz.
-        out = Tensor(h_all, _children=(x, self.W_x, self.W_h, self.b), _op="lstm", requires_grad=x.requires_grad)
+        # Tüm ara değerleri içeren ana tensörü oluştur
+        out_full_sequence = Tensor(h_all, _children=(x, self.W_x, self.W_h, self.b), _op="lstm", requires_grad=x.requires_grad)
         
         # Geriye yayılım için gerekli tüm ara değerleri sakla
         self.cache = (x.data, h_all, c_all, i_all, f_all, o_all, g_all)
 
         def _backward():
-            if not out.requires_grad or out.grad is None: return
+            # --- GERİ YAYILIM MANTIĞI DEĞİŞMİYOR ---
+            # Geri yayılım, gradyanın tüm zaman adımları üzerinden akmasını gerektirir.
+            # Biz sadece ileri adımdaki SON çıktıyı değiştiriyoruz, gradyan akışı
+            # hala tüm sekansı kullanmalıdır.
+            if not out_full_sequence.requires_grad or out_full_sequence.grad is None: return
             assert self.cache is not None, "Cache is not set"
             
             x_data, h_data, c_data, i_data, f_data, o_data, g_data = self.cache
@@ -106,7 +107,7 @@ class LSTM(Layer):
             dc_next = xp.zeros((_N, _H))
 
             for t in reversed(range(_T)):
-                dh = out.grad[:, t, :] + dh_next
+                dh = out_full_sequence.grad[:, t, :] + dh_next
                 
                 dc = dc_next + dh * o_data[:, t, :] * (1 - xp.tanh(c_data[:, t, :])**2)
                 
@@ -138,8 +139,11 @@ class LSTM(Layer):
             if self.W_h.requires_grad and self.W_h.grad is not None: self.W_h.grad += dW_h
             if self.b.requires_grad and self.b.grad is not None: self.b.grad += db
 
-        out._backward = _backward
-        return out
+        out_full_sequence._backward = _backward
+        
+        # --- KRİTİK DEĞİŞİKLİK: Sadece son zaman adımını döndür ---
+        # Bu, LSTM'den sonra gelen Linear katmanın doğru boyutta (N, H) girdi almasını sağlar.
+        return out_full_sequence[:, -1, :]
 
 
 class Flatten(Layer):
@@ -149,8 +153,6 @@ class Flatten(Layer):
     def forward(self, x: Tensor) -> Tensor:
         self.input_shape = x.data.shape
         N = self.input_shape[0]
-        # Düzeltme: Flatten işlemi için yeni bir tensör oluştururken,
-        # gradyanın doğru akabilmesi için ata (child) tensörü belirtiyoruz.
         out = Tensor(x.data.reshape(N, -1), _children=(x,), _op="flatten", requires_grad=x.requires_grad)
         
         def _backward():

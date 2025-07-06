@@ -44,18 +44,10 @@ class Learner:
             
             y_pred = self.model(X_train_t)
             
-            # --- KRİTİK DÜZELTME BURADA BAŞLIYOR ---
-            # Eğer modelin çıktısı (y_pred) 3 boyutlu ise (N, T, F),
-            # bu bir zaman serisi modelidir ve kayıp hesabı için sadece son zaman adımını
-            # kullanmamız gerekir.
-            if y_pred.data.ndim == 3 and y_train_t.data.ndim == 2:
-                # y_pred'in şekli (batch, seq_len, features) -> son adımı al -> (batch, features)
-                y_pred_for_loss = y_pred[:, -1, :]
-            else:
-                y_pred_for_loss = y_pred
-            
-            loss = self.criterion(y_pred_for_loss, y_train_t)
-            # --- KRİTİK DÜZELTME BURADA BİTİYOR ---
+            # --- ÖNCEKİ DÜZELTME KALDIRILDI ---
+            # Artık y_pred ve y_train_t'nin boyutları uyumlu olmalı.
+            loss = self.criterion(y_pred, y_train_t)
+            # --- BİTTİ ---
             
             self.optimizer.zero_grad()
             loss.backward()
@@ -81,6 +73,14 @@ class Learner:
         
         input_tensor = Tensor(X_test)
         predictions_tensor = self.model(input_tensor)
+        
+        # --- PREDICT İÇİN DE DÜZELTME ---
+        # Eğer model LSTM içeriyorsa, çıktı (N, H) olur. 
+        # Eğer bir sonraki katman Linear(H,1) ise, çıktı (N, 1) olur.
+        # Bu zaten doğru boyutta. Sadece emin olmak için.
+        # Eğer modelin kendisi son zaman adımını döndürüyorsa, burada da ek bir şey yapmaya gerek yok.
+        # LSTM -> Linear(H, 1) zinciri zaten (N, 1) döndürecektir.
+        
         return predictions_tensor.to_cpu()
 
     def evaluate(self, X_val: np.ndarray, y_val: np.ndarray) -> Dict[str, float]:
@@ -92,14 +92,10 @@ class Learner:
         y_val_t = Tensor(y_val)
         y_pred_t = self.model(Tensor(X_val))
         
-        # --- DEĞERLENDİRME İÇİN DE AYNI DÜZELTME ---
-        if y_pred_t.data.ndim == 3 and y_val_t.data.ndim == 2:
-            y_pred_for_eval = y_pred_t[:, -1, :]
-        else:
-            y_pred_for_eval = y_pred_t
-        
-        val_loss = self.criterion(y_pred_for_eval, y_val_t).to_cpu().item()
-        y_pred_np = y_pred_for_eval.to_cpu()
+        # --- ÖNCEKİ DÜZELTME KALDIRILDI ---
+        # Artık y_pred_t ve y_val_t'nin boyutları uyumlu olmalı.
+        val_loss = self.criterion(y_pred_t, y_val_t).to_cpu().item()
+        y_pred_np = y_pred_t.to_cpu()
         # --- BİTTİ ---
 
         y_val_np = y_val if isinstance(y_val, np.ndarray) else np.array(y_val)
