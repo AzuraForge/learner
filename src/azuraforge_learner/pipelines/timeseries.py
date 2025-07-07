@@ -265,33 +265,25 @@ class TimeSeriesPipeline(BasePipeline):
             forecast_data.append({'time': next_index, 'predicted_value': predicted_value})
             
             # Bir sonraki iterasyon için current_sequence_df'i güncelle
-            # Yeni satır için bir sözlük oluştur, tüm feature_cols'ları içerdiğinden emin ol.
-            # Sütunları ve değerleri current_sequence_df'in yapısına uygun hale getir.
             new_row_data = {}
             for col in self.feature_cols:
                 if col == self.target_col:
                     new_row_data[col] = predicted_value
                 else:
-                    # Diğer özellik sütunları için current_sequence_df'in son değerini kullan
-                    # ve tipini de eşle.
                     new_row_data[col] = current_sequence_df[col].iloc[-1]
             
-            # Yeni satır DataFrame'ini, mevcut sütun sıralamasını kullanarak oluştur.
-            # Bu, concat sırasında sütun uyumsuzluklarını önler.
             new_row_df = pd.DataFrame([new_row_data], index=[next_index], columns=self.feature_cols)
             
-            # === HATA DÜZELTMESİ BURADA ===
-            # Tüm sütunların np.float32 tipinde olduğundan emin ol.
-            # Bu, en kritik adımdır, concat sırasında tip karışıklıklarını engeller.
+            # === DEĞİŞİKLİK BURADA ===
+            # Veri tipini bilinçli olarak float32'ye zorla. Bu, tek sütunlu
+            # senaryoda `pd.concat`'in tipi 'object' olarak belirlemesini engeller.
             for col in new_row_df.columns:
                 new_row_df[col] = new_row_df[col].astype(np.float32)
-            # === DÜZELTME SONU ===
+            # === DEĞİŞİKLİK SONU ===
 
-            # Konkatenasyon ve son `sequence_length` kadar veri tutma
             current_sequence_df = pd.concat([current_sequence_df, new_row_df]).tail(sequence_length)
             
         forecast_df = pd.DataFrame(forecast_data).set_index('time')
-        # forecast_df'in sütun adını 'predicted_value'dan target_col adına değiştir.
         forecast_df.rename(columns={'predicted_value': self.target_col}, inplace=True)
         
         self.logger.info(f"Finished generating {num_steps} future predictions.")
