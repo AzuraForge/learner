@@ -236,11 +236,8 @@ class TimeSeriesPipeline(BasePipeline):
         
         sequence_length = self.config.get("model_params", {}).get("sequence_length", 60)
         
-        # KRİTİK DÜZELTME: initial_df'i sadece self.feature_cols ile sınırla.
-        # Bu, pd.concat'ın farklı sütun setleriyle karşılaşmasını önler
-        # ve current_sequence_df ile new_row_df'in aynı sütunlara sahip olmasını sağlar.
+        # Sadece modelin feature_cols'larını içeren bir kopyasını al
         initial_df_filtered = initial_df[self.feature_cols].copy()
-        
         current_sequence_df = initial_df_filtered.tail(sequence_length).copy()
 
         forecast_data = []
@@ -259,8 +256,8 @@ class TimeSeriesPipeline(BasePipeline):
             # Tahmini ters ölçekle ve ters log dönüşümü yap
             unscaled_prediction_value_flat, _ = self._inverse_transform_all(scaled_prediction_value, scaled_prediction_value)
             
-            predicted_value = unscaled_prediction_value_flat[0]
-            
+            predicted_value = float(unscaled_prediction_value_flat[0]) # Tahmin edilen değeri float olarak al
+
             # Bir sonraki zaman adımını oluştur
             next_index = last_index + time_diff * (i + 1)
             
@@ -268,24 +265,25 @@ class TimeSeriesPipeline(BasePipeline):
             forecast_data.append({'time': next_index, 'predicted_value': predicted_value})
             
             # Bir sonraki iterasyon için current_sequence_df'i güncelle
-            new_row_dict = {}
+            # Yeni satır için bir sözlük oluştur, tüm feature_cols'ları içerdiğinden emin ol.
+            # Sütunları ve değerleri current_sequence_df'in yapısına uygun hale getir.
+            new_row_data = {}
             for col in self.feature_cols:
                 if col == self.target_col:
-                    new_row_dict[col] = predicted_value
+                    new_row_data[col] = predicted_value
                 else:
-                    # Diğer özellik sütunları için varsayılan bir değer kullanın.
-                    # Örneğin, 0.0 veya current_sequence_df'in son değeri.
-                    # Eğer model diğer özelliklere de duyarlıysa, bu değerlerin de mantıklı olması gerekir.
-                    new_row_dict[col] = current_sequence_df[col].iloc[-1] # Son bilinen değeri kullan
-
-            new_row_df = pd.DataFrame([new_row_dict], index=[next_index])
+                    # Diğer özellik sütunları için current_sequence_df'in son değerini kullan
+                    # ve tipini de eşle.
+                    new_row_data[col] = current_sequence_df[col].iloc[-1]
             
-            # new_row_df'in sütun tiplerini current_sequence_df'ten eşitle
-            # Bu, concat'ın tip çıkarım hatasını önler.
-            for col in current_sequence_df.columns:
-                if col not in new_row_df.columns:
-                    new_row_df[col] = np.nan # Bu durumda, filtered edilmiş DF'ler için bu satır gereksiz olabilir.
-                new_row_df[col] = new_row_df[col].astype(current_sequence_df[col].dtype)
+            # Yeni satır DataFrame'ini, mevcut sütun sıralamasını kullanarak oluştur.
+            # Bu, concat sırasında sütun uyumsuzluklarını önler.
+            new_row_df = pd.DataFrame([new_row_data], index=[next_index], columns=self.feature_cols)
+            
+            # Tüm sütunların np.float32 tipinde olduğundan emin ol.
+            # Bu, en kritik adımdır, tip karışıklıklarını engeller.
+            for col in new_row_df.columns:
+                new_row_df[col] = new_row_df[col].astype(np.float32)
 
             # Konkatenasyon ve son `sequence_length` kadar veri tutma
             current_sequence_df = pd.concat([current_sequence_df, new_row_df]).tail(sequence_length)
