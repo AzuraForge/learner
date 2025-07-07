@@ -18,7 +18,7 @@ from ..losses import MSELoss
 from ..models import Sequential
 from ..optimizers import Adam, SGD
 from ..reporting import generate_regression_report
-from azuraforge_core import Tensor # Tensor'u import ediyoruz
+from azuraforge_core import Tensor
 
 def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np.ndarray]:
     xs, ys = [], []
@@ -30,6 +30,7 @@ def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np
     return np.array(xs), np.array(ys).reshape(-1, data.shape[1] if data.ndim > 1 else -1)
 
 class LivePredictionCallback(Callback):
+    # ... Bu sınıfta değişiklik yok ...
     def __init__(self, pipeline: 'TimeSeriesPipeline', X_val: np.ndarray, y_val: np.ndarray, time_index_val: pd.Index):
         super().__init__()
         self.pipeline = pipeline
@@ -67,8 +68,8 @@ class LivePredictionCallback(Callback):
         except Exception as e:
             self.pipeline.logger.error(f"LivePredictionCallback Error: {e}", exc_info=True)
 
-
 class TimeSeriesPipeline(BasePipeline):
+    # ... __init__, _get_target_and_feature_cols, _create_model, _create_learner, _inverse_transform_all, _fit_scalers, _prepare_data_for_training, run metodlarında değişiklik yok ...
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.target_scaler: MinMaxScaler = MinMaxScaler(feature_range=(-1, 1))
@@ -108,26 +109,20 @@ class TimeSeriesPipeline(BasePipeline):
         return y_true_unscaled.flatten(), y_pred_unscaled.flatten()
         
     def _fit_scalers(self, data: pd.DataFrame):
-        if self.is_fitted:
-            return
-            
+        if self.is_fitted: return
         self.logger.info("Fitting data scalers...")
         self.target_col, self.feature_cols = self._get_target_and_feature_cols()
-        
         target_series = data[self.target_col].copy()
         if self.config.get("feature_engineering", {}).get("target_col_transform") == 'log':
             target_series = np.log1p(target_series)
-        
         self.target_scaler.fit(target_series.values.reshape(-1, 1))
         self.feature_scaler.fit(data[self.feature_cols])
-        
         self.is_fitted = True
         self.logger.info("Scalers have been fitted.")
 
     def _prepare_data_for_training(self, data: pd.DataFrame) -> Tuple:
         self.logger.info("Preparing data for training...")
         self._fit_scalers(data)
-        
         data_sourcing_config = self.config.get("data_sourcing", {})
         data_limit = data_sourcing_config.get("data_limit")
         if data_limit and isinstance(data_limit, int) and data_limit > 0:
@@ -136,7 +131,6 @@ class TimeSeriesPipeline(BasePipeline):
 
         scaled_features = self.feature_scaler.transform(data[self.feature_cols])
         sequence_length = self.config.get("model_params", {}).get("sequence_length", 60)
-        
         X, y = _create_sequences(scaled_features, sequence_length)
         
         try:
@@ -148,10 +142,8 @@ class TimeSeriesPipeline(BasePipeline):
         if len(X) == 0: raise ValueError(f"Not enough data to create sequences (need > {sequence_length} rows).")
         test_size = self.config.get("training_params", {}).get("test_size", 0.2)
         X_train, X_test, y_train, y_test = train_test_split(X, y_target_only, test_size=test_size, shuffle=False)
-        
         time_index_for_sequences = data.index[sequence_length:]
         time_index_test = time_index_for_sequences[len(X_train):]
-        
         self.logger.info(f"Data prepared: X_train shape={X_train.shape}, X_test shape={X_test.shape}")
         return X_train, y_train, X_test, y_test, time_index_test
 
@@ -176,8 +168,7 @@ class TimeSeriesPipeline(BasePipeline):
                 "history": self.learner.history,
                 "metrics": {'r2_score': float(r2_score(y_test_unscaled, y_pred_unscaled)), 'mae': float(mean_absolute_error(y_test_unscaled, y_pred_unscaled))},
                 "final_loss": self.learner.history.get('loss', [None])[-1],
-                "y_true": y_test_unscaled.tolist(),
-                "y_pred": y_pred_unscaled.tolist(),
+                "y_true": y_test_unscaled.tolist(), "y_pred": y_pred_unscaled.tolist(),
                 "time_index": [d.isoformat() for d in time_index_test], 
                 "y_label": self.target_col
              }
@@ -186,20 +177,21 @@ class TimeSeriesPipeline(BasePipeline):
         generate_regression_report(final_results, self.config)
         return final_results
     
-    def prepare_data_for_prediction(self, new_data_df: pd.DataFrame) -> np.ndarray:
+    def prepare_data_for_prediction(self, data_for_prediction: pd.DataFrame) -> np.ndarray:
         sequence_length = self.config.get("model_params", {}).get("sequence_length", 60)
-        if len(new_data_df) < sequence_length: 
+        
+        if len(data_for_prediction) < sequence_length:
             raise ValueError(f"Prediction data must have at least {sequence_length} rows.")
         
-        relevant_data_for_features = new_data_df.tail(sequence_length)[self.feature_cols]
-
-        # === KESİN ÇÖZÜM BURADA ===
-        # Scaler'a göndermeden önce DataFrame'in veri tipini garanti altına al.
-        # Bu, `forecast` döngüsünden gelen 'object' tipli sütunları düzeltecektir.
-        numeric_features = relevant_data_for_features.astype(np.float32)
-        scaled_features = self.feature_scaler.transform(numeric_features)
-        # === ÇÖZÜM SONU ===
+        relevant_data = data_for_prediction.tail(sequence_length)[self.feature_cols]
         
+        # Tip tutarlılığını sağlamak için veriyi float32'ye dönüştür
+        numeric_values = relevant_data.astype(np.float32).values
+        
+        # Veriyi ölçekle
+        scaled_features = self.feature_scaler.transform(numeric_values)
+        
+        # Modela uygun 3 boyutlu şekle getir (batch_size=1, sequence_length, num_features)
         model_input = scaled_features.reshape(1, sequence_length, -1)
         return model_input
 
@@ -209,34 +201,46 @@ class TimeSeriesPipeline(BasePipeline):
             
         self.logger.info(f"Generating {num_steps} future predictions...")
         sequence_length = self.config.get("model_params", {}).get("sequence_length", 60)
-        initial_df_filtered = initial_df[self.feature_cols].copy()
-        current_sequence_df = initial_df_filtered.tail(sequence_length).copy()
+        
+        # === DEĞİŞİKLİK BAŞLANGICI: DataFrame yerine NumPy dizisi ile çalışma ===
+        # Başlangıç verisini ölçeklenmiş bir NumPy dizisine çevir
+        initial_sequence_df = initial_df.tail(sequence_length)[self.feature_cols]
+        current_sequence_np = self.feature_scaler.transform(initial_sequence_df.astype(np.float32))
 
-        forecast_data = []
-        last_index = current_sequence_df.index[-1]
-        time_diff = pd.Timedelta(current_sequence_df.index[1] - current_sequence_df.index[0])
-        self.logger.info(f"Detected time interval: {time_diff}")
+        forecast_values = []
+        target_col_index = self.feature_cols.index(self.target_col)
 
-        for i in range(num_steps):
-            prepared_data = self.prepare_data_for_prediction(current_sequence_df)
-            scaled_prediction_value = learner.predict(prepared_data)
-            unscaled_prediction_value_flat, _ = self._inverse_transform_all(scaled_prediction_value, scaled_prediction_value)
-            predicted_value = float(unscaled_prediction_value_flat[0])
-            next_index = last_index + time_diff * (i + 1)
-            forecast_data.append({'time': next_index, 'predicted_value': predicted_value})
+        for _ in range(num_steps):
+            # Model girdisini hazırla (zaten doğru formatta)
+            model_input = current_sequence_np.reshape(1, sequence_length, -1)
             
-            new_row_data = {}
-            for col in self.feature_cols:
-                if col == self.target_col:
-                    new_row_data[col] = predicted_value
-                else:
-                    new_row_data[col] = current_sequence_df[col].iloc[-1]
+            # Tahmin yap (ölçeklenmiş)
+            scaled_prediction = learner.predict(model_input) # Çıktı: (1, 1)
             
-            new_row_df = pd.DataFrame([new_row_data], index=[next_index], columns=self.feature_cols)
-            current_sequence_df = pd.concat([current_sequence_df, new_row_df]).tail(sequence_length)
+            # Gelecekteki satırı oluştur (ölçeklenmiş)
+            next_row = current_sequence_np[-1, :].copy() # Son satırı kopyala
+            next_row[target_col_index] = scaled_prediction[0, 0] # Hedef sütunu güncelle
             
-        forecast_df = pd.DataFrame(forecast_data).set_index('time')
-        forecast_df.rename(columns={'predicted_value': self.target_col}, inplace=True)
+            # Diziyi kaydır ve yeni satırı ekle
+            current_sequence_np = np.vstack([current_sequence_np[1:], next_row])
+            
+            # Tahmini saklamak için ters ölçekle
+            # Sadece hedef sütunu içeren geçici bir dizi oluştur
+            temp_target_array = np.zeros((1, 1))
+            temp_target_array[0, 0] = scaled_prediction[0, 0]
+            unscaled_prediction, _ = self._inverse_transform_all(temp_target_array, temp_target_array)
+            forecast_values.append(unscaled_prediction[0])
+        # === DEĞİŞİKLİK SONU ===
+            
+        # Sonuçları DataFrame'e dönüştür
+        last_index = initial_df.index[-1]
+        time_diff = pd.Timedelta(initial_df.index[1] - initial_df.index[0])
+        forecast_index = pd.to_datetime([last_index + time_diff * (i + 1) for i in range(num_steps)])
+        
+        forecast_df = pd.DataFrame(
+            data={self.target_col: forecast_values},
+            index=forecast_index
+        )
         
         self.logger.info(f"Finished generating {num_steps} future predictions.")
         return forecast_df
