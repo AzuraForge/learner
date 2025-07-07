@@ -95,7 +95,6 @@ class TimeSeriesPipeline(BasePipeline):
         return Learner(model, MSELoss(), optimizer, callbacks=callbacks)
 
     def _inverse_transform_all(self, y_true_scaled, y_pred_scaled):
-        # ÖLÇEKLEME: y_true_scaled ve y_pred_scaled'i 2 boyutlu hale getiriyoruz.
         y_true_scaled = y_true_scaled.reshape(-1, 1)
         y_pred_scaled = y_pred_scaled.reshape(-1, 1)
 
@@ -103,30 +102,23 @@ class TimeSeriesPipeline(BasePipeline):
         y_pred_unscaled = self.target_scaler.inverse_transform(y_pred_scaled)
         
         if self.config.get("feature_engineering", {}).get("target_col_transform") == 'log':
-            # log1p'nin tersi expm1'dir
             y_true_unscaled = np.expm1(y_true_unscaled)
             y_pred_unscaled = np.expm1(y_pred_unscaled)
         
         return y_true_unscaled.flatten(), y_pred_unscaled.flatten()
         
     def _fit_scalers(self, data: pd.DataFrame):
-        # Bu metod sadece `run` veya `predict` çağrıldığında ilk kez çalışır.
         if self.is_fitted:
-            self.logger.info("Scalers already fitted. Skipping.")
             return
             
         self.logger.info("Fitting data scalers...")
         self.target_col, self.feature_cols = self._get_target_and_feature_cols()
         
-        # Hedef sütunu ölçeklemeden önce bir kopyasını al
         target_series = data[self.target_col].copy()
         if self.config.get("feature_engineering", {}).get("target_col_transform") == 'log':
             target_series = np.log1p(target_series)
         
-        # target_scaler sadece hedef sütun üzerinde eğitilir
         self.target_scaler.fit(target_series.values.reshape(-1, 1))
-
-        # feature_scaler tüm özellik sütunları üzerinde eğitilir
         self.feature_scaler.fit(data[self.feature_cols])
         
         self.is_fitted = True
@@ -134,7 +126,7 @@ class TimeSeriesPipeline(BasePipeline):
 
     def _prepare_data_for_training(self, data: pd.DataFrame) -> Tuple:
         self.logger.info("Preparing data for training...")
-        self._fit_scalers(data) # Scaler'ların eğitildiğinden emin ol
+        self._fit_scalers(data)
         
         data_sourcing_config = self.config.get("data_sourcing", {})
         data_limit = data_sourcing_config.get("data_limit")
@@ -149,8 +141,7 @@ class TimeSeriesPipeline(BasePipeline):
         
         try:
             target_col_index = self.feature_cols.index(self.target_col)
-            # y'nin sadece hedef sütuna ait değerleri içerdiğinden emin ol
-            y_target_only = y[:, target_col_index].reshape(-1, 1) # 2 boyutlu olmalı
+            y_target_only = y[:, target_col_index].reshape(-1, 1)
         except (ValueError, IndexError):
              raise ValueError(f"Target column '{self.target_col}' not found in feature columns.")
         
@@ -158,38 +149,26 @@ class TimeSeriesPipeline(BasePipeline):
         test_size = self.config.get("training_params", {}).get("test_size", 0.2)
         X_train, X_test, y_train, y_test = train_test_split(X, y_target_only, test_size=test_size, shuffle=False)
         
-        # time_index_test, X_test'in sonuna denk gelen gerçek zaman indeksidir.
-        # Bu, prediction_comparison grafiği için kullanılır.
         time_index_for_sequences = data.index[sequence_length:]
-        time_index_test = time_index_for_sequences[len(X_train):] # X_test'e karşılık gelen zaman dilimi
+        time_index_test = time_index_for_sequences[len(X_train):]
         
         self.logger.info(f"Data prepared: X_train shape={X_train.shape}, X_test shape={X_test.shape}")
         return X_train, y_train, X_test, y_test, time_index_test
 
     def run(self, raw_data: pd.DataFrame, callbacks: Optional[List[Callback]] = None, skip_training: bool = False) -> Dict[str, Any]:
         self.logger.info(f"Running TimeSeriesPipeline: '{self.config.get('pipeline_name')}'...")
-
-        self._fit_scalers(raw_data) # Scaler'ları başta bir kez eğit.
-
+        self._fit_scalers(raw_data)
         if skip_training:
-            self.logger.info("Training skipped as requested.")
             return {"status": "skipped", "message": "Training skipped."}
             
         X_train, y_train, X_test, y_test, time_index_test = self._prepare_data_for_training(raw_data)
-        
-        # Modeli oluştururken input_shape'in 3 boyutlu olduğundan emin olmalıyız.
-        # X_train.shape (batch_size, sequence_length, num_features)
         model = self._create_model(input_shape=X_train.shape) 
-        
         live_predict_cb = LivePredictionCallback(self, X_test, y_test, time_index_test)
-        
         self.learner = self._create_learner(model, [live_predict_cb] + (callbacks or []))
         epochs = int(self.config.get("training_params", {}).get("epochs", 50))
         self.learner.fit(X_train, y_train, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
-        
         final_results = live_predict_cb.last_results
         if not final_results:
-             # Eğer callback çalışmadıysa veya hata verdiyse manuel olarak sonuçları al
              y_pred_scaled = self.learner.predict(X_test)
              y_test_unscaled, y_pred_unscaled = self._inverse_transform_all(y_test, y_pred_scaled)
              from sklearn.metrics import r2_score, mean_absolute_error
@@ -197,34 +176,30 @@ class TimeSeriesPipeline(BasePipeline):
                 "history": self.learner.history,
                 "metrics": {'r2_score': float(r2_score(y_test_unscaled, y_pred_unscaled)), 'mae': float(mean_absolute_error(y_test_unscaled, y_pred_unscaled))},
                 "final_loss": self.learner.history.get('loss', [None])[-1],
-                "y_true": y_test_unscaled.tolist(), 
+                "y_true": y_test_unscaled.tolist(),
                 "y_pred": y_pred_unscaled.tolist(),
                 "time_index": [d.isoformat() for d in time_index_test], 
                 "y_label": self.target_col
              }
-        
-        # Nihai sonuçlar sözlüğüne, tahmin için gereken sütun bilgilerini ekle.
         final_results['target_col'] = self.target_col
         final_results['feature_cols'] = self.feature_cols
-
         generate_regression_report(final_results, self.config)
         return final_results
     
     def prepare_data_for_prediction(self, new_data_df: pd.DataFrame) -> np.ndarray:
-        # Yeni verinin son sequence_length kadarını al
         sequence_length = self.config.get("model_params", {}).get("sequence_length", 60)
-        
-        # Eğer yeni veri yeterli değilse hata ver
         if len(new_data_df) < sequence_length: 
             raise ValueError(f"Prediction data must have at least {sequence_length} rows.")
         
-        # Sadece modelin beklediği feature_cols'ları kullan
         relevant_data_for_features = new_data_df.tail(sequence_length)[self.feature_cols]
+
+        # === KESİN ÇÖZÜM BURADA ===
+        # Scaler'a göndermeden önce DataFrame'in veri tipini garanti altına al.
+        # Bu, `forecast` döngüsünden gelen 'object' tipli sütunları düzeltecektir.
+        numeric_features = relevant_data_for_features.astype(np.float32)
+        scaled_features = self.feature_scaler.transform(numeric_features)
+        # === ÇÖZÜM SONU ===
         
-        # Özellikleri ölçekle
-        scaled_features = self.feature_scaler.transform(relevant_data_for_features)
-        
-        # Modela uygun 3 boyutlu şekle getir (batch_size=1, sequence_length, num_features)
         model_input = scaled_features.reshape(1, sequence_length, -1)
         return model_input
 
@@ -233,38 +208,23 @@ class TimeSeriesPipeline(BasePipeline):
             raise RuntimeError("Scalers not fitted. Call `run(skip_training=True)` or `_fit_scalers` first.")
             
         self.logger.info(f"Generating {num_steps} future predictions...")
-        
         sequence_length = self.config.get("model_params", {}).get("sequence_length", 60)
-        
-        # Sadece modelin feature_cols'larını içeren bir kopyasını al
         initial_df_filtered = initial_df[self.feature_cols].copy()
         current_sequence_df = initial_df_filtered.tail(sequence_length).copy()
 
         forecast_data = []
         last_index = current_sequence_df.index[-1]
-        
         time_diff = pd.Timedelta(current_sequence_df.index[1] - current_sequence_df.index[0])
         self.logger.info(f"Detected time interval: {time_diff}")
 
         for i in range(num_steps):
-            # Model girdisini hazırla
             prepared_data = self.prepare_data_for_prediction(current_sequence_df)
-            
-            # Tahmin yap
             scaled_prediction_value = learner.predict(prepared_data)
-            
-            # Tahmini ters ölçekle ve ters log dönüşümü yap
             unscaled_prediction_value_flat, _ = self._inverse_transform_all(scaled_prediction_value, scaled_prediction_value)
-            
-            predicted_value = float(unscaled_prediction_value_flat[0]) # Tahmin edilen değeri float olarak al
-
-            # Bir sonraki zaman adımını oluştur
+            predicted_value = float(unscaled_prediction_value_flat[0])
             next_index = last_index + time_diff * (i + 1)
-            
-            # Tahmin verisini kaydet
             forecast_data.append({'time': next_index, 'predicted_value': predicted_value})
             
-            # Bir sonraki iterasyon için current_sequence_df'i güncelle
             new_row_data = {}
             for col in self.feature_cols:
                 if col == self.target_col:
@@ -273,14 +233,6 @@ class TimeSeriesPipeline(BasePipeline):
                     new_row_data[col] = current_sequence_df[col].iloc[-1]
             
             new_row_df = pd.DataFrame([new_row_data], index=[next_index], columns=self.feature_cols)
-            
-            # === DEĞİŞİKLİK BURADA ===
-            # Veri tipini bilinçli olarak float32'ye zorla. Bu, tek sütunlu
-            # senaryoda `pd.concat`'in tipi 'object' olarak belirlemesini engeller.
-            for col in new_row_df.columns:
-                new_row_df[col] = new_row_df[col].astype(np.float32)
-            # === DEĞİŞİKLİK SONU ===
-
             current_sequence_df = pd.concat([current_sequence_df, new_row_df]).tail(sequence_length)
             
         forecast_df = pd.DataFrame(forecast_data).set_index('time')
