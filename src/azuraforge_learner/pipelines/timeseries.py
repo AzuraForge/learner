@@ -280,10 +280,12 @@ class TimeSeriesPipeline(BasePipeline):
             # Bu, concat sırasında sütun uyumsuzluklarını önler.
             new_row_df = pd.DataFrame([new_row_data], index=[next_index], columns=self.feature_cols)
             
+            # === HATA DÜZELTMESİ BURADA ===
             # Tüm sütunların np.float32 tipinde olduğundan emin ol.
-            # Bu, en kritik adımdır, tip karışıklıklarını engeller.
+            # Bu, en kritik adımdır, concat sırasında tip karışıklıklarını engeller.
             for col in new_row_df.columns:
                 new_row_df[col] = new_row_df[col].astype(np.float32)
+            # === DÜZELTME SONU ===
 
             # Konkatenasyon ve son `sequence_length` kadar veri tutma
             current_sequence_df = pd.concat([current_sequence_df, new_row_df]).tail(sequence_length)
