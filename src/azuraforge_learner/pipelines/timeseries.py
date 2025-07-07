@@ -27,9 +27,6 @@ def _create_sequences(data: np.ndarray, seq_length: int) -> Tuple[np.ndarray, np
         y = data[i + seq_length]
         xs.append(x)
         ys.append(y)
-    # y için target_col_index kullanmak yerine, TimeSeriesPipeline'ın kendisi
-    # scaler ile transform ederken sadece hedef sütunu alacak.
-    # _create_sequences'ın görevi sadece sıraları oluşturmak.
     return np.array(xs), np.array(ys).reshape(-1, data.shape[1] if data.ndim > 1 else -1)
 
 class LivePredictionCallback(Callback):
@@ -54,12 +51,6 @@ class LivePredictionCallback(Callback):
             y_pred_scaled = self.learner.predict(self.X_val)
             y_test_unscaled, y_pred_unscaled = self.pipeline._inverse_transform_all(self.y_val, y_pred_scaled)
             
-            # === DÜZELTME: Live tahminde x_axis ve y_true/y_pred boyut uyumsuzluğunu gider ===
-            # TimeSeriesPipeline'ın kendisi scalerları kullanarak son N noktayı döndürdüğünden,
-            # burada da uygun şekilde eşleşmeli.
-            # Normalde validation_data'nın X_val ile uyumlu olması gerekir.
-            # Şimdilik, sadece `predict`ten gelen `y_true` ve `y_pred`'i kullanıyoruz.
-            
             event.payload['validation_data'] = {
                 "x_axis": [d.isoformat() for d in self.time_index_val],
                 "y_true": y_test_unscaled.tolist(), 
@@ -80,7 +71,6 @@ class LivePredictionCallback(Callback):
 class TimeSeriesPipeline(BasePipeline):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        # Scaler'lar pipeline örneği başına saklanır.
         self.target_scaler: MinMaxScaler = MinMaxScaler(feature_range=(-1, 1))
         self.feature_scaler: MinMaxScaler = MinMaxScaler(feature_range=(-1, 1))
         self.target_col: Optional[str] = None
@@ -238,23 +228,24 @@ class TimeSeriesPipeline(BasePipeline):
         model_input = scaled_features.reshape(1, sequence_length, -1)
         return model_input
 
-    # === YENİ FONKSİYON: Çok Adımlı Tahmin ===
     def forecast(self, initial_df: pd.DataFrame, learner: Learner, num_steps: int) -> pd.DataFrame:
         if not self.is_fitted:
             raise RuntimeError("Scalers not fitted. Call `run(skip_training=True)` or `_fit_scalers` first.")
             
         self.logger.info(f"Generating {num_steps} future predictions...")
         
-        # Tahmin için son sequence_length verisini al
         sequence_length = self.config.get("model_params", {}).get("sequence_length", 60)
         
-        # İlk tahmin için kullanılacak veri, `initial_df`'in son `sequence_length` adımı olmalı
-        current_sequence_df = initial_df.tail(sequence_length).copy()
+        # KRİTİK DÜZELTME: initial_df'i sadece self.feature_cols ile sınırla.
+        # Bu, pd.concat'ın farklı sütun setleriyle karşılaşmasını önler
+        # ve current_sequence_df ile new_row_df'in aynı sütunlara sahip olmasını sağlar.
+        initial_df_filtered = initial_df[self.feature_cols].copy()
+        
+        current_sequence_df = initial_df_filtered.tail(sequence_length).copy()
 
         forecast_data = []
         last_index = current_sequence_df.index[-1]
         
-        # Zaman aralığını otomatik belirle (saatlik veya günlük)
         time_diff = pd.Timedelta(current_sequence_df.index[1] - current_sequence_df.index[0])
         self.logger.info(f"Detected time interval: {time_diff}")
 
@@ -277,27 +268,31 @@ class TimeSeriesPipeline(BasePipeline):
             forecast_data.append({'time': next_index, 'predicted_value': predicted_value})
             
             # Bir sonraki iterasyon için current_sequence_df'i güncelle
-            # Yeni bir DataFrame satırı oluştur
-            new_row_dict = {col: 0.0 for col in self.feature_cols} # Varsayılan olarak 0, sadece tahmin edilen hedef sütun güncellenecek
-            
-            # Hedef sütununun indeksini bul ve tahmin edilen değerle güncelle
-            if self.target_col in new_row_dict:
-                new_row_dict[self.target_col] = predicted_value
-            
-            # Yeni satırı DataFrame'e ekle ve eski ilk satırı çıkar
+            new_row_dict = {}
+            for col in self.feature_cols:
+                if col == self.target_col:
+                    new_row_dict[col] = predicted_value
+                else:
+                    # Diğer özellik sütunları için varsayılan bir değer kullanın.
+                    # Örneğin, 0.0 veya current_sequence_df'in son değeri.
+                    # Eğer model diğer özelliklere de duyarlıysa, bu değerlerin de mantıklı olması gerekir.
+                    new_row_dict[col] = current_sequence_df[col].iloc[-1] # Son bilinen değeri kullan
+
             new_row_df = pd.DataFrame([new_row_dict], index=[next_index])
+            
+            # new_row_df'in sütun tiplerini current_sequence_df'ten eşitle
+            # Bu, concat'ın tip çıkarım hatasını önler.
+            for col in current_sequence_df.columns:
+                if col not in new_row_df.columns:
+                    new_row_df[col] = np.nan # Bu durumda, filtered edilmiş DF'ler için bu satır gereksiz olabilir.
+                new_row_df[col] = new_row_df[col].astype(current_sequence_df[col].dtype)
+
+            # Konkatenasyon ve son `sequence_length` kadar veri tutma
             current_sequence_df = pd.concat([current_sequence_df, new_row_df]).tail(sequence_length)
             
-            # Yeni current_sequence_df'i ölçekleyip modele verebilmek için
-            # target_col dışındaki diğer feature_cols için değerlere ihtiyacımız var.
-            # Şu an sadece target_col'u tahminle dolduruyoruz, diğerleri 0 kalıyor.
-            # Gerçek uygulamalarda bu diğer feature'lar için de bir tahmin mekanizması
-            # veya gelecekteki bilinen değerler (örn: hava durumu için rüzgar hızı) gerekebilir.
-            # Şimdilik basitleştirilmiş bir yaklaşım izliyoruz.
-            
-            # Not: current_sequence_df artık ham değerler içeriyor, scaled değil.
-            # prepare_data_for_prediction methodu bunu otomatik olarak ölçekleyecek.
-            
         forecast_df = pd.DataFrame(forecast_data).set_index('time')
+        # forecast_df'in sütun adını 'predicted_value'dan target_col adına değiştir.
+        forecast_df.rename(columns={'predicted_value': self.target_col}, inplace=True)
+        
         self.logger.info(f"Finished generating {num_steps} future predictions.")
         return forecast_df
