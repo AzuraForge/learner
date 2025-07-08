@@ -8,7 +8,7 @@ from .callbacks import Callback
 from .losses import Loss, MSELoss, CrossEntropyLoss
 from .layers import (
     Layer, Linear, ReLU, Sigmoid, LSTM, Conv2D, 
-    MaxPool2D, Flatten, Embedding, Attention
+    MaxPool2D, Flatten, Embedding, Attention, Dropout # Dropout eklendi
 )
 from .models import Sequential
 from .optimizers import Optimizer, SGD, Adam
@@ -24,7 +24,7 @@ __all__ = [
     "Event", "Callback",
     "Loss", "MSELoss", "CrossEntropyLoss",
     "Layer", "Linear", "ReLU", "Sigmoid", "LSTM", "Conv2D", "MaxPool2D", 
-    "Flatten", "Embedding", "Attention",
+    "Flatten", "Embedding", "Attention", "Dropout", # Dropout eklendi
     "Sequential", 
     "Optimizer", "SGD", "Adam",
     "Learner",

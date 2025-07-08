@@ -145,6 +145,45 @@ class LSTM(Layer):
         # Bu, LSTM'den sonra gelen Linear katmanın doğru boyutta (N, H) girdi almasını sağlar.
         return out_full_sequence[:, -1, :]
 
+class Dropout(Layer):
+    """
+    Eğitim sırasında aşırı öğrenmeyi (overfitting) önlemek için kullanılan Dropout katmanı.
+    Tahmin (eval) modunda hiçbir şey yapmaz.
+    """
+    def __init__(self, p: float = 0.5):
+        super().__init__()
+        if not (0.0 <= p < 1.0):
+            raise ValueError(f"Dropout olasılığı 0 ile 1 arasında olmalı, ancak {p} girildi.")
+        self.p = p
+        self.is_training = True # Varsayılan olarak eğitim modunda başlar
+
+    def forward(self, x: Tensor) -> Tensor:
+        # Eğer eğitim modunda değilsek (yani tahmin yapıyorsak), girdiyi olduğu gibi döndür.
+        if not self.is_training:
+            return x
+        
+        # Eğitim sırasında, bazı nöronları rastgele sıfırlayan bir maske oluştur.
+        # Kalan nöronların çıktısını (1 - p) ile ölçekleyerek beklenen değeri koru.
+        mask = (xp.random.rand(*x.data.shape) > self.p)
+        out_data = x.data * mask
+        
+        out = Tensor(out_data, _children=(x,), _op="dropout", requires_grad=x.requires_grad)
+
+        def _backward():
+            if x.requires_grad and x.grad is not None:
+                # Gradyan akışı sadece "açık" olan nöronlardan geçer.
+                x.grad += out.grad * mask
+
+        out._backward = _backward
+        return out
+
+    def eval(self):
+        """Modeli tahmin/değerlendirme moduna alır, Dropout'u devre dışı bırakır."""
+        self.is_training = False
+
+    def train(self):
+        """Modeli eğitim moduna alır, Dropout'u etkinleştirir."""
+        self.is_training = True
 
 class Flatten(Layer):
     def __init__(self):
