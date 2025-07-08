@@ -91,8 +91,10 @@ class Learner:
         if not isinstance(X_test, np.ndarray):
             raise TypeError("Girdi (X_test) bir NumPy dizisi olmalıdır.")
         
-        # === YENİ: Bellek verimliliği için predict işlemini de batch'ler halinde yapalım ===
-        batch_size = 128 # Tahmin için makul bir batch boyutu
+        # Modeli tahmin moduna al (örn: Dropout'u kapatmak için)
+        self.model.eval()
+        
+        batch_size = 128
         num_samples = X_test.shape[0]
         all_predictions = []
 
@@ -102,7 +104,10 @@ class Learner:
             predictions_tensor = self.model(input_tensor)
             all_predictions.append(predictions_tensor.to_cpu())
             
-        return np.vstack(all_predictions)
+        # Tahmin bittikten sonra modeli tekrar eğitim moduna alabiliriz, bu iyi bir pratik.
+        self.model.train()
+
+        return np.vstack(all_predictions) if all_predictions else np.array([])
 
     def evaluate(self, X_val: np.ndarray, y_val: np.ndarray) -> Dict[str, float]:
         if not self.criterion:
