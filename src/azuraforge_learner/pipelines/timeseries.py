@@ -157,8 +157,19 @@ class TimeSeriesPipeline(BasePipeline):
         model = self._create_model(input_shape=X_train.shape) 
         live_predict_cb = LivePredictionCallback(self, X_test, y_test, time_index_test)
         self.learner = self._create_learner(model, [live_predict_cb] + (callbacks or []))
-        epochs = int(self.config.get("training_params", {}).get("epochs", 50))
-        self.learner.fit(X_train, y_train, epochs=epochs, pipeline_name=self.config.get("pipeline_name"))
+        
+        # === DEĞİŞİKLİK BURADA ===
+        training_params = self.config.get("training_params", {})
+        epochs = int(training_params.get("epochs", 50))
+        # Yeni batch_size parametresini konfigürasyondan alıyoruz
+        batch_size = int(training_params.get("batch_size", 32)) 
+        
+        self.logger.info(f"Starting training with epochs={epochs}, batch_size={batch_size}")
+        
+        # Learner'ın fit metoduna batch_size'ı iletiyoruz
+        self.learner.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, pipeline_name=self.config.get("pipeline_name"))
+        # === DEĞİŞİKLİK SONU ===
+        
         final_results = live_predict_cb.last_results
         if not final_results:
              y_pred_scaled = self.learner.predict(X_test)

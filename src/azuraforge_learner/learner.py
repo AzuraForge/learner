@@ -1,8 +1,9 @@
+# ========== DOSYA: learner/src/azuraforge_learner/learner.py ==========
 import time
 from typing import Any, Dict, List, Optional
 import numpy as np
 
-from azuraforge_core import Tensor
+from azuraforge_core import Tensor, xp  # xp'yi import ediyoruz
 from .events import Event
 from .models import Sequential
 from .losses import Loss
@@ -27,33 +28,53 @@ class Learner:
         for cb in self.callbacks:
             cb(event)
 
-    def fit(self, X_train: np.ndarray, y_train: np.ndarray, epochs: int, pipeline_name: str = "Bilinmiyor"):
+    def fit(self, X_train: np.ndarray, y_train: np.ndarray, epochs: int, batch_size: int, pipeline_name: str = "Bilinmiyor"):
         if not self.criterion or not self.optimizer:
             raise RuntimeError("Cannot fit the model without a criterion and an optimizer.")
             
         self.history = {"loss": []}
-        X_train_t, y_train_t = Tensor(X_train), Tensor(y_train)
         
         self._publish("train_begin", payload={"total_epochs": epochs, "status_text": "Eğitim başlıyor...", "pipeline_name": pipeline_name})
         
+        num_samples = X_train.shape[0]
+
         for epoch in range(epochs):
             if self.stop_training:
                 break
             
+            # === YENİ: Veriyi karıştırarak batch'lere hazırlama ===
+            permutation = np.random.permutation(num_samples)
+            X_shuffled = X_train[permutation]
+            y_shuffled = y_train[permutation]
+            
+            epoch_losses = []
             self._publish("epoch_begin", payload={"epoch": epoch, "total_epochs": epochs, "pipeline_name": pipeline_name})
             
-            y_pred = self.model(X_train_t)
-            
-            # --- ÖNCEKİ DÜZELTME KALDIRILDI ---
-            # Artık y_pred ve y_train_t'nin boyutları uyumlu olmalı.
-            loss = self.criterion(y_pred, y_train_t)
-            # --- BİTTİ ---
-            
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
-            
-            current_loss = loss.to_cpu().item() if hasattr(loss, 'to_cpu') else float(loss.data)
+            # === YENİ: Mini-batch döngüsü ===
+            for i in range(0, num_samples, batch_size):
+                self._publish("batch_begin", payload={"epoch": epoch, "batch_index": i // batch_size})
+
+                X_batch = X_shuffled[i:i+batch_size]
+                y_batch = y_shuffled[i:i+batch_size]
+
+                X_batch_t, y_batch_t = Tensor(X_batch), Tensor(y_batch)
+
+                # İleri geçiş
+                y_pred = self.model(X_batch_t)
+                loss = self.criterion(y_pred, y_batch_t)
+                
+                # Geriye yayılım ve optimizasyon
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+
+                # Bu batch'in kaybını kaydet
+                epoch_losses.append(loss.to_cpu().item())
+                self._publish("batch_end", payload={"epoch": epoch, "batch_index": i // batch_size, "batch_loss": loss.to_cpu().item()})
+
+            # Epoch sonu işlemleri
+            current_loss = np.mean(epoch_losses)
+            self.history["loss"].append(current_loss)
             
             epoch_logs = {
                 "epoch": epoch + 1, "total_epochs": epochs, "loss": current_loss,
@@ -61,7 +82,6 @@ class Learner:
                 "pipeline_name": pipeline_name
             }
             
-            self.history["loss"].append(current_loss)
             self._publish("epoch_end", payload=epoch_logs)
             
         self._publish("train_end", payload={"status_text": "Eğitim tamamlandı.", "pipeline_name": pipeline_name})
@@ -71,17 +91,18 @@ class Learner:
         if not isinstance(X_test, np.ndarray):
             raise TypeError("Girdi (X_test) bir NumPy dizisi olmalıdır.")
         
-        input_tensor = Tensor(X_test)
-        predictions_tensor = self.model(input_tensor)
-        
-        # --- PREDICT İÇİN DE DÜZELTME ---
-        # Eğer model LSTM içeriyorsa, çıktı (N, H) olur. 
-        # Eğer bir sonraki katman Linear(H,1) ise, çıktı (N, 1) olur.
-        # Bu zaten doğru boyutta. Sadece emin olmak için.
-        # Eğer modelin kendisi son zaman adımını döndürüyorsa, burada da ek bir şey yapmaya gerek yok.
-        # LSTM -> Linear(H, 1) zinciri zaten (N, 1) döndürecektir.
-        
-        return predictions_tensor.to_cpu()
+        # === YENİ: Bellek verimliliği için predict işlemini de batch'ler halinde yapalım ===
+        batch_size = 128 # Tahmin için makul bir batch boyutu
+        num_samples = X_test.shape[0]
+        all_predictions = []
+
+        for i in range(0, num_samples, batch_size):
+            X_batch = X_test[i:i+batch_size]
+            input_tensor = Tensor(X_batch)
+            predictions_tensor = self.model(input_tensor)
+            all_predictions.append(predictions_tensor.to_cpu())
+            
+        return np.vstack(all_predictions)
 
     def evaluate(self, X_val: np.ndarray, y_val: np.ndarray) -> Dict[str, float]:
         if not self.criterion:
@@ -89,16 +110,16 @@ class Learner:
             
         from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
         
-        y_val_t = Tensor(y_val)
-        y_pred_t = self.model(Tensor(X_val))
-        
-        # --- ÖNCEKİ DÜZELTME KALDIRILDI ---
-        # Artık y_pred_t ve y_val_t'nin boyutları uyumlu olmalı.
-        val_loss = self.criterion(y_pred_t, y_val_t).to_cpu().item()
-        y_pred_np = y_pred_t.to_cpu()
-        # --- BİTTİ ---
+        # predict metodu zaten batch'ler halinde çalışıyor
+        y_pred_np = self.predict(X_val)
 
-        y_val_np = y_val if isinstance(y_val, np.ndarray) else np.array(y_val)
+        # y_val'in de (N, 1) şeklinde olduğundan emin olalım
+        y_val_np = y_val.reshape(-1, 1) if isinstance(y_val, np.ndarray) else np.array(y_val).reshape(-1, 1)
+
+        # Kaybı hesaplamak için tensörlere çevir
+        y_val_t = Tensor(y_val_np)
+        y_pred_t = Tensor(y_pred_np)
+        val_loss = self.criterion(y_pred_t, y_val_t).to_cpu().item()
         
         val_r2 = r2_score(y_val_np, y_pred_np)
         val_mae = mean_absolute_error(y_val_np, y_pred_np)
