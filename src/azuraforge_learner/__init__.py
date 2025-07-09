@@ -5,15 +5,13 @@ Yüksek seviyeli AI bileşenlerini dışa aktarır.
 """
 from .events import Event
 from .callbacks import Callback
-# --- DEĞİŞİKLİK BURADA ---
 from .losses import Loss, MSELoss, CrossEntropyLoss
 from .layers import (
     Layer, Linear, ReLU, Sigmoid, LSTM, Conv2D, 
     MaxPool2D, Flatten, Embedding, Attention, Dropout
 )
-# --- DEĞİŞİKLİK SONU ---
 from .models import Sequential
-from .optimizers import Optimizer, SGD, Adam
+from .optimizers import Optimizer, SGD, Adam # Artık yeni alt paketten
 from .learner import Learner
 from .pipelines import (
     BasePipeline, 
@@ -36,4 +34,3 @@ __all__ = [
     "ImageClassificationPipeline",
     "AudioGenerationPipeline"
 ]
-

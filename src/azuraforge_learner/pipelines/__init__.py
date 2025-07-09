@@ -6,11 +6,11 @@ dışa aktarılacak temel pipeline sınıflarını tanımlar.
 from .base import BasePipeline
 from .timeseries import TimeSeriesPipeline
 from .image_classification import ImageClassificationPipeline
-from .audio_generation import AudioGenerationPipeline # <-- YENİ SATIR
+from .audio_generation import AudioGenerationPipeline
 
 __all__ = [
     "BasePipeline",
     "TimeSeriesPipeline",
     "ImageClassificationPipeline",
-    "AudioGenerationPipeline", # <-- YENİ SATIR
+    "AudioGenerationPipeline",
 ]
