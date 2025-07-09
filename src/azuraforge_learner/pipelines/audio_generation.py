@@ -5,6 +5,7 @@ import numpy as np
 from pydantic import BaseModel
 from scipy.io import wavfile
 from importlib import resources
+from scipy.signal import resample
 
 from .base import BasePipeline
 from ..callbacks import Callback
@@ -12,7 +13,9 @@ from ..learner import Learner
 from ..losses import CrossEntropyLoss
 from ..models import Sequential
 from ..optimizers import Adam
-from azuraforge_core import Tensor
+# === KRİTİK DÜZELTME ===
+from azuraforge_core import Tensor, xp
+# === DÜZELTME SONU ===
 
 class AudioGenerationPipeline(BasePipeline):
     """Ses üretimi görevleri için temel pipeline."""
@@ -89,11 +92,7 @@ class AudioGenerationPipeline(BasePipeline):
         output_path = None
         output_dir = self.config.get("experiment_dir")
         if output_dir:
-            # === KRİTİK DÜZELTME ===
-            # Dosyayı yazmadan önce dizinin var olduğundan emin ol.
             os.makedirs(output_dir, exist_ok=True)
-            # === DÜZELTME SONU ===
-            
             output_path = os.path.join(output_dir, "generated_sample.wav")
             wavfile.write(output_path, sample_rate, generated_audio_16bit)
             self.logger.info(f"Generated audio sample saved to: {output_path}")
@@ -111,7 +110,6 @@ class AudioGenerationPipeline(BasePipeline):
         self.learner.model.eval()
 
         for i in range(generation_length):
-            # İlerleme göstermek için her 1000 örnekte bir log yazdırabiliriz
             if (i + 1) % 1000 == 0:
                 self.logger.debug(f"Generating sample {i+1}/{generation_length}...")
 
@@ -119,8 +117,8 @@ class AudioGenerationPipeline(BasePipeline):
             logits = self.learner.predict(input_sequence) 
             last_step_logits = logits[0, -1, :]
             
+            # xp artık burada tanımlı
             probs = xp.exp(last_step_logits) / xp.sum(xp.exp(last_step_logits))
-            # CuPy dizisinden CPU'ya çekip NumPy ile choice yap
             next_sample = np.random.choice(len(probs), p=xp.asnumpy(probs))
             
             generated_waveform.append(next_sample)
