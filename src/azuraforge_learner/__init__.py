@@ -5,9 +5,8 @@ Yüksek seviyeli AI bileşenlerini dışa aktarır.
 """
 from .events import Event
 from .callbacks import Callback
-from .losses import Loss, MSELoss, CrossEntropyLoss
 # --- DEĞİŞİKLİK BURADA ---
-# Artık doğrudan yeni `layers` alt paketinden import ediyoruz.
+from .losses import Loss, MSELoss, CrossEntropyLoss
 from .layers import (
     Layer, Linear, ReLU, Sigmoid, LSTM, Conv2D, 
     MaxPool2D, Flatten, Embedding, Attention, Dropout
@@ -37,3 +36,4 @@ __all__ = [
     "ImageClassificationPipeline",
     "AudioGenerationPipeline"
 ]
+
