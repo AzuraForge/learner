@@ -12,7 +12,61 @@ from ..learner import Learner
 from ..losses import CrossEntropyLoss
 from ..models import Sequential
 from ..optimizers import Adam
-from azuraforge_core import Tensor, xp
+from azuraforge_core import Tensor
+
+class AudioGenerationPipeline(BasePipeline):
+    # ... (__init__, get_config_model, _load_data, _create_model, _create_sequences) aynı ...
+
+    def run(self, callbacks: Optional[List[Callback]] = None, skip_training: bool = False) -> Dict[str, Any]:
+        self.logger.info(f"Running AudioGenerationPipeline: '{self.config.get('pipeline_name')}'...")
+        
+        encoded_waveform = self._load_data()
+        vocab_size = int(encoded_waveform.max() + 1)
+        
+        seq_length = self.config.get("model_params", {}).get("sequence_length", 128)
+        X_train, y_train = self._create_sequences(encoded_waveform, seq_length)
+
+        model = self._create_model(vocab_size)
+        
+        training_params = self.config.get("training_params", {})
+        lr = float(training_params.get("lr", 0.001))
+        optimizer = Adam(model.parameters(), lr=lr)
+
+        # === DEĞİŞİKLİK: Learner'ı gradyan kırpma ile başlatıyoruz ===
+        self.learner = Learner(
+            model, 
+            CrossEntropyLoss(), 
+            optimizer, 
+            callbacks=callbacks,
+            grad_clip_value=1.0  # Gradyan normu 1.0'ı aşarsa kırp
+        )
+        # === DEĞİŞİKLİK SONU ===
+
+        epochs = int(training_params.get("epochs", 5))
+        batch_size = int(training_params.get("batch_size", 64))
+        
+        history = self.learner.fit(X_train, y_train.astype(np.int64), epochs=epochs, batch_size=batch_size, pipeline_name=self.config.get("pipeline_name"))
+        
+        self.logger.info("Generating a sample audio clip after training...")
+        seed_sequence = X_train[np.random.randint(0, len(X_train))]
+        sample_rate = self.config.get("data_sourcing", {}).get("sample_rate", 8000)
+        
+        generated_audio_quantized = self.generate(seed_sequence, generation_length=sample_rate * 5)
+        
+        quantization_channels = vocab_size
+        mu = float(quantization_channels - 1)
+        encoded_float = (generated_audio_quantized.astype(np.float32) / mu) * 2 - 1
+        decoded_float = np.sign(encoded_float) * (np.expm1(np.abs(encoded_float) * np.log1p(mu))) / mu
+        generated_audio_16bit = (decoded_float * 32767).astype(np.int16)
+
+        output_path = None
+        output_dir = self.config.get("experiment_dir")
+        if output_dir:
+            output_path = os.path.join(output_dir, "generated_sample.wav")
+            wavfile.write(output_path, sample_rate, generated_audio_16bit)
+            self.logger.info(f"Generated audio sample saved to: {output_path}")
+        
+        return {"history": history, "generated_audio_path": output_path}
 
 class AudioGenerationPipeline(BasePipeline):
     """Ses üretimi görevleri için temel pipeline."""

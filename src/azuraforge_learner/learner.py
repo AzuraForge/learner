@@ -1,9 +1,8 @@
-# ========== DOSYA: learner/src/azuraforge_learner/learner.py ==========
 import time
 from typing import Any, Dict, List, Optional
 import numpy as np
 
-from azuraforge_core import Tensor, xp  # xp'yi import ediyoruz
+from azuraforge_core import Tensor, xp
 from .events import Event
 from .models import Sequential
 from .losses import Loss
@@ -11,11 +10,12 @@ from .optimizers import Optimizer
 from .callbacks import Callback
 
 class Learner:
-    def __init__(self, model: Sequential, criterion: Optional[Loss] = None, optimizer: Optional[Optimizer] = None, callbacks: Optional[List[Callback]] = None):
+    def __init__(self, model: Sequential, criterion: Optional[Loss] = None, optimizer: Optional[Optimizer] = None, callbacks: Optional[List[Callback]] = None, grad_clip_value: Optional[float] = None):
         self.model = model
         self.criterion = criterion
         self.optimizer = optimizer
         self.callbacks = callbacks or []
+        self.grad_clip_value = grad_clip_value # Yeni parametre
         
         for cb in self.callbacks:
             cb.set_learner(self)
@@ -42,7 +42,6 @@ class Learner:
             if self.stop_training:
                 break
             
-            # === YENİ: Veriyi karıştırarak batch'lere hazırlama ===
             permutation = np.random.permutation(num_samples)
             X_shuffled = X_train[permutation]
             y_shuffled = y_train[permutation]
@@ -50,7 +49,6 @@ class Learner:
             epoch_losses = []
             self._publish("epoch_begin", payload={"epoch": epoch, "total_epochs": epochs, "pipeline_name": pipeline_name})
             
-            # === YENİ: Mini-batch döngüsü ===
             for i in range(0, num_samples, batch_size):
                 self._publish("batch_begin", payload={"epoch": epoch, "batch_index": i // batch_size})
 
@@ -59,20 +57,22 @@ class Learner:
 
                 X_batch_t, y_batch_t = Tensor(X_batch), Tensor(y_batch)
 
-                # İleri geçiş
                 y_pred = self.model(X_batch_t)
                 loss = self.criterion(y_pred, y_batch_t)
                 
-                # Geriye yayılım ve optimizasyon
                 self.optimizer.zero_grad()
                 loss.backward()
+
+                # === YENİ ADIM: GRADIENT CLIPPING ===
+                if self.grad_clip_value is not None:
+                    self.optimizer.clip_gradients(self.grad_clip_value)
+                # === BİTTİ ===
+
                 self.optimizer.step()
 
-                # Bu batch'in kaybını kaydet
                 epoch_losses.append(loss.to_cpu().item())
                 self._publish("batch_end", payload={"epoch": epoch, "batch_index": i // batch_size, "batch_loss": loss.to_cpu().item()})
 
-            # Epoch sonu işlemleri
             current_loss = np.mean(epoch_losses)
             self.history["loss"].append(current_loss)
             
@@ -90,46 +90,30 @@ class Learner:
     def predict(self, X_test: np.ndarray) -> np.ndarray:
         if not isinstance(X_test, np.ndarray):
             raise TypeError("Girdi (X_test) bir NumPy dizisi olmalıdır.")
-        
-        # Modeli tahmin moduna al (örn: Dropout'u kapatmak için)
         self.model.eval()
-        
         batch_size = 128
         num_samples = X_test.shape[0]
         all_predictions = []
-
         for i in range(0, num_samples, batch_size):
             X_batch = X_test[i:i+batch_size]
             input_tensor = Tensor(X_batch)
             predictions_tensor = self.model(input_tensor)
             all_predictions.append(predictions_tensor.to_cpu())
-            
-        # Tahmin bittikten sonra modeli tekrar eğitim moduna alabiliriz, bu iyi bir pratik.
         self.model.train()
-
         return np.vstack(all_predictions) if all_predictions else np.array([])
 
     def evaluate(self, X_val: np.ndarray, y_val: np.ndarray) -> Dict[str, float]:
         if not self.criterion:
             raise RuntimeError("Cannot evaluate the model without a criterion.")
-            
         from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
-        
-        # predict metodu zaten batch'ler halinde çalışıyor
         y_pred_np = self.predict(X_val)
-
-        # y_val'in de (N, 1) şeklinde olduğundan emin olalım
         y_val_np = y_val.reshape(-1, 1) if isinstance(y_val, np.ndarray) else np.array(y_val).reshape(-1, 1)
-
-        # Kaybı hesaplamak için tensörlere çevir
         y_val_t = Tensor(y_val_np)
         y_pred_t = Tensor(y_pred_np)
         val_loss = self.criterion(y_pred_t, y_val_t).to_cpu().item()
-        
         val_r2 = r2_score(y_val_np, y_pred_np)
         val_mae = mean_absolute_error(y_val_np, y_pred_np)
         val_rmse = np.sqrt(mean_squared_error(y_val_np, y_pred_np))
-
         return {"val_loss": val_loss, "val_r2": val_r2, "val_mae": val_mae, "val_rmse": val_rmse}
 
     def save_model(self, filepath: str):
