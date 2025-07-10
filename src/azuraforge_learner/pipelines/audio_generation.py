@@ -4,8 +4,8 @@ from typing import Dict, Any, Optional, List, Tuple
 import numpy as np
 from pydantic import BaseModel
 from scipy.io import wavfile
+from scipy import signal, resample
 from importlib import resources
-from scipy.signal import resample
 
 from .base import BasePipeline
 from ..callbacks import Callback
@@ -13,7 +13,7 @@ from ..learner import Learner
 from ..losses import CrossEntropyLoss
 from ..models import Sequential
 from ..optimizers import Adam
-from azuraforge_core import Tensor, xp
+from azuraforge_core import Tensor, xp, DEVICE
 
 class AudioGenerationPipeline(BasePipeline):
     """Ses üretimi görevleri için temel pipeline."""
@@ -108,7 +108,7 @@ class AudioGenerationPipeline(BasePipeline):
             wavfile.write(output_path, sample_rate, generated_audio_16bit)
             self.logger.info(f"Generated audio sample saved to: {output_path}")
         
-        return {"history": history, "generated_audio_path": output_path}     
+        return {"history": history, "generated_audio_path": output_path}   
 
     def generate(self, initial_seed: np.ndarray, generation_length: int) -> np.ndarray:
         if not self.learner or not self.learner.model:
@@ -122,11 +122,21 @@ class AudioGenerationPipeline(BasePipeline):
 
         for _ in range(generation_length):
             input_sequence = current_sequence.reshape(1, -1)
-            logits = self.learner.predict(input_sequence) 
+            logits = self.learner.predict(input_sequence)
             last_step_logits = logits[0, -1, :]
             
-            probs = np.exp(last_step_logits) / np.sum(np.exp(last_step_logits))
+            # === KRİTİK DÜZELTME ===
+            # Eğer GPU'daysak, `probs` bir CuPy dizisi olacaktır.
+            # `np.random.choice`'a vermeden önce onu CPU'ya (NumPy) çekmeliyiz.
+            if DEVICE == 'gpu':
+                # .get() metodu CuPy dizisini NumPy dizisine dönüştürür.
+                last_step_logits_np = last_step_logits.get()
+            else:
+                last_step_logits_np = last_step_logits
+
+            probs = np.exp(last_step_logits_np) / np.sum(np.exp(last_step_logits_np))
             next_sample = np.random.choice(len(probs), p=probs)
+            # === DÜZELTME SONU ===
             
             generated_waveform.append(next_sample)
             
