@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional, List, Tuple
 import numpy as np
 from pydantic import BaseModel
 from scipy.io import wavfile
-from scipy import signal, resample
+from scipy import signal
 from importlib import resources
 
 from .base import BasePipeline
