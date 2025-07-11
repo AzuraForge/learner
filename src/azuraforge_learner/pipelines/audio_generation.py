@@ -59,6 +59,13 @@ class AudioGenerationPipeline(BasePipeline):
         pass
 
     def run(self, callbacks: Optional[List[Callback]] = None, skip_training: bool = False) -> Dict[str, Any]:
+        # === YENİ: experiment_dir oluşturma adımı ===
+        output_dir = self.config.get("experiment_dir")
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            self.logger.info(f"Ensured experiment directory exists: {output_dir}")
+        # === BİTTİ ===
+
         self.logger.info(f"Running AudioGenerationPipeline: '{self.config.get('pipeline_name')}'...")
         
         encoded_waveform = self._load_data()
@@ -81,20 +88,18 @@ class AudioGenerationPipeline(BasePipeline):
             grad_clip_value=1.0
         )
 
-        epochs = int(training_params.get("epochs", 5))
-        batch_size = int(training_params.get("batch_size", 128)) # Batch size'ı artıralım
+        epochs = int(training_params.get("epochs", 10))
+        batch_size = int(training_params.get("batch_size", 128))
         
         history = self.learner.fit(X_train, y_train.astype(np.int64), epochs=epochs, batch_size=batch_size, pipeline_name=self.config.get("pipeline_name"))
         
         self.logger.info("Generating a sample audio clip after training...")
-        # Üretim için rastgele bir başlangıç noktası seç
         start_index = np.random.randint(0, len(X_train) - 1)
         seed_sequence = X_train[start_index]
         sample_rate = self.config.get("data_sourcing", {}).get("sample_rate", 8000)
         
         generated_audio_quantized = self.generate(seed_sequence, generation_length=sample_rate * 5)
         
-        # Mu-law decode ve .wav dosyasına yazma
         quantization_channels = vocab_size
         mu = float(quantization_channels - 1)
         encoded_float = (generated_audio_quantized.astype(np.float32) / mu) * 2 - 1
@@ -102,47 +107,59 @@ class AudioGenerationPipeline(BasePipeline):
         generated_audio_16bit = (decoded_float * 32767).astype(np.int16)
 
         output_path = None
-        output_dir = self.config.get("experiment_dir")
         if output_dir:
             output_path = os.path.join(output_dir, "generated_sample.wav")
             wavfile.write(output_path, sample_rate, generated_audio_16bit)
             self.logger.info(f"Generated audio sample saved to: {output_path}")
         
-        return {"history": history, "generated_audio_path": output_path}   
+        return {"history": history, "generated_audio_path": output_path}     
 
     def generate(self, initial_seed: np.ndarray, generation_length: int) -> np.ndarray:
         if not self.learner or not self.learner.model:
             raise RuntimeError("Model has not been trained or loaded. Cannot generate audio.")
         
         self.logger.info(f"Starting audio generation for {generation_length} samples...")
-        current_sequence = initial_seed.copy()
-        generated_waveform = []
-
+        
         self.learner.model.eval()
 
-        for _ in range(generation_length):
-            input_sequence = current_sequence.reshape(1, -1)
-            logits = self.learner.predict(input_sequence)
-            last_step_logits = logits[0, -1, :]
-            
-            # === KRİTİK DÜZELTME ===
-            # Eğer GPU'daysak, `probs` bir CuPy dizisi olacaktır.
-            # `np.random.choice`'a vermeden önce onu CPU'ya (NumPy) çekmeliyiz.
-            if DEVICE == 'gpu':
-                # .get() metodu CuPy dizisini NumPy dizisine dönüştürür.
-                last_step_logits_np = last_step_logits.get()
-            else:
-                last_step_logits_np = last_step_logits
+        # === PERFORMANS OPTİMİZASYONU ===
+        # Başlangıç dizisini en başta GPU'ya (veya mevcut cihaza) gönder.
+        current_sequence_gpu = xp.asarray(initial_seed)
+        generated_waveform_gpu = xp.zeros(generation_length, dtype=xp.uint8)
 
-            probs = np.exp(last_step_logits_np) / np.sum(np.exp(last_step_logits_np))
-            next_sample = np.random.choice(len(probs), p=probs)
-            # === DÜZELTME SONU ===
+        for i in range(generation_length):
+            # Girdi artık her zaman doğru cihazda ve 2D (1, T) şeklinde.
+            input_tensor = Tensor(current_sequence_gpu.reshape(1, -1))
             
-            generated_waveform.append(next_sample)
+            # `predict` artık bir NumPy dizisi döndürüyor, tekrar Tensor'e çevirmeye gerek yok.
+            logits = self.learner.model(input_tensor) # Doğrudan model.forward çağrısı
             
-            current_sequence = np.roll(current_sequence, -1)
-            current_sequence[-1] = next_sample
+            # Hesaplamaları GPU üzerinde (xp ile) yap
+            last_step_logits = logits.data[0, -1, :]
+            probs = xp.exp(last_step_logits) / xp.sum(xp.exp(last_step_logits))
             
+            # `xp.random.choice` CuPy'de yok, bu yüzden olasılıkları CPU'ya çekip NumPy kullanmalıyız.
+            # Ancak bu, her adımda senkronizasyon gerektirir. Daha verimli bir yol arayalım.
+            # Şimdilik en basit ve doğru yol, sadece bu kısmı CPU'da yapmaktır.
+            if DEVICE == 'gpu':
+                probs_cpu = probs.get()
+            else:
+                probs_cpu = probs
+                
+            next_sample = np.random.choice(len(probs_cpu), p=probs_cpu)
+            
+            generated_waveform_gpu[i] = next_sample
+            
+            # Diziyi GPU üzerinde (xp ile) kaydır
+            current_sequence_gpu = xp.roll(current_sequence_gpu, -1)
+            current_sequence_gpu[-1] = next_sample
+
         self.logger.info("Audio generation finished.")
         self.learner.model.train()
-        return np.array(generated_waveform, dtype=np.uint8)
+
+        # Sonucu tek seferde CPU'ya çek (eğer GPU'daysa)
+        if DEVICE == 'gpu':
+            return generated_waveform_gpu.get()
+        else:
+            return generated_waveform_gpu
+        # === OPTİMİZASYON SONU ===
